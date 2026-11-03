@@ -8,7 +8,7 @@
 > **AI 生成项目**：本项目的代码与文档由 AI（Claude）在人工指导下生成，并经过实机验证。
 > 代码可读性、边界处理和长期维护都不如人工项目，请自行审阅后再使用。
 >
-> **当前能力有限**：目前只验证了**留影（Recording）**的保存与复制；
+> **当前能力有限**：目前只验证了**留影（Recording）** 的保存与复制；
 > 留言（Message）、共享空间（Shared Space）尚未打通。
 >
 > **兼容性**：mod 里的地址是**硬编码到具体游戏版本**的（开发时是 Steam 版 0.35.2.426499）。
@@ -202,7 +202,6 @@ mod 不会往安装目录写运行文件，全部落在：
 - [that-sky-pianoplay](https://github.com/that-sky-project/that-sky-pianoplay) —— 同一生态下的
   乐器自动演奏工具，本项目的 README 结构参考了它。
 - [HTModLoader](https://github.com/that-sky-project) —— 本 mod 依赖的加载器与 SDK。
-- Sky Studio / Sky Music 等社区制谱工具 —— 留影数据之外的音乐相关内容。
 
 ## 许可证
 
