@@ -1,0 +1,16 @@
+{
+  "package_name": "sky-blueprint",
+  "version": "0.1.0",
+  "game_edition": 2,
+  "mod_name": "Sky Blueprint",
+  "description": "Save and copy Sky recordings (blueprints) for local research.",
+  "main": "sky-blueprint.dll",
+  "dependencies": {},
+  "keywords": [
+    "blueprint",
+    "recording"
+  ],
+  "author": "mclvlc",
+  "license": "GPL-3.0",
+  "website": "https://github.com/mclvlc/that-sky-blueprint"
+}

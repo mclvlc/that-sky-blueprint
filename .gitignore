@@ -1,0 +1,31 @@
+# 构建产物
+mod/dist/
+mod/dist_cn/
+mod/dist_cn_live/
+*.o
+*.dll
+*.exe
+
+# HTModLoader SDK（自行放置，不分发）
+mod/libraries/
+
+# 运行期数据（绝对不要提交：含 session / 留影内容）
+samples/
+*.skyblueprint
+*.ndjson
+links.txt
+session.json
+feed_meta.json
+deploy_queue.json
+deploy_result.*
+captures/
+records/
+bp.log
+requests.json
+
+# 本地服务器配置
+tool/server.json
+
+# Python
+__pycache__/
+*.pyc
