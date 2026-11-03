@@ -1,0 +1,5 @@
+{
+  "rewrite": {
+    "old.example.com": "new.example.com"
+  }
+}
