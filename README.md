@@ -104,7 +104,20 @@ CN=2 bash build.sh         # 国服（只读抓取）
 # 产物: mod/dist/sky-blueprint.dll
 ```
 
-### 2. 安装
+### 2. 自动构建（GitHub Actions）
+
+推一个 `v*` 标签就会触发 `.github/workflows/build-release.yml`：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+工作流会下载 HTModLoader SDK（Release 附件里的 `sdk/`）、编译 `sky-blueprint.dll`，
+并把 `sky-blueprint-<tag>.zip`（dll + manifest + README）发布到 GitHub Releases。
+不推 tag 时也可以在 Actions 页面手动运行（只上传 artifact，不发 Release）。
+
+### 3. 安装
 
 把 `sky-blueprint.dll` 和 `manifest.json` 放进：
 
@@ -116,7 +129,7 @@ CN=2 bash build.sh         # 国服（只读抓取）
 （选择保存到 `<数据目录>/ui.cfg`，默认英文）。中文字体会自动从系统字体目录加载，
 所以备注、留言文本里的中文在两种界面下都能正常显示。
 
-### 3. 服务器地址（自动识别）
+### 4. 服务器地址（自动识别）
 
 mod 启动时会自己确定部署地址，写到 `%APPDATA%\sky-blueprint\<steam|cn>\server.txt`：
 
@@ -141,7 +154,7 @@ $env:SKY_SERVER = "https://your.server"
 { "rewrite": { "old.example.com": "new.example.com" } }
 ```
 
-### 4. 抓取一个留影
+### 5. 抓取一个留影
 
 1. 游戏里点开一个留影（让它完整播放或至少加载出下载请求）
 2. mod 会把链接写进 `%APPDATA%\sky-blueprint\steam\links.txt`
@@ -154,7 +167,7 @@ python tool/autofetch.py --once   # 处理一次
 
 蓝图会生成到 `%APPDATA%\sky-blueprint\steam\blueprints\`，也就是 mod 面板默认读取的目录。
 
-### 5. 复制到服务器
+### 6. 复制到服务器
 
 **方式 A：游戏内一键部署（推荐）**
 
@@ -176,7 +189,7 @@ python tool/deploy.py samples/xxx.skyblueprint \
     --message "Blueprint"
 ```
 
-### 6. 共享空间（保存 / 部署）
+### 7. 共享空间（保存 / 部署）
 
 打开一个共享空间后，mod 会抓取 `stage/api/v1/get` 的响应并写到：
 
@@ -208,7 +221,7 @@ python tool/stage_deploy.py other_space.skyblueprint --force --verify
 
 游戏内也可以：选中 `shared_space` 蓝图 → Deploy，面板会自动带上源空间的世界坐标。
 
-### 7. 留言（保存 / 发布）
+### 8. 留言（保存 / 发布）
 
 点开一条留言后，mod 记录它的 feed（`messages.json` + `message_views.json`），
 转换器只为“看过”的留言生成蓝图：
@@ -226,7 +239,7 @@ python tool/message_deploy.py message_xxx.skyblueprint
 python tool/message_deploy.py message_xxx.skyblueprint --message "新文本" --pos "(x,y,z)"
 ```
 
-### 8. 手动查看 / 校验
+### 9. 手动查看 / 校验
 
 ```bash
 python tool/skybp.py list  %APPDATA%\sky-blueprint\steam\blueprints

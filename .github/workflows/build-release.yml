@@ -1,0 +1,92 @@
+name: Build mod and release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  HTML_SDK_VERSION: v1.10.3
+  ASSET_NAME: sky-blueprint-${{ github.ref_name }}.zip
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            make
+            zip
+            unzip
+            curl
+
+      - name: Fetch HTModLoader SDK
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/HTMonkeyG/HTML-Sky/releases/tags/${HTML_SDK_VERSION}"
+          url=$(curl -fsSL "$api" | grep -o '"browser_download_url":[[:space:]]*"[^"]*\.zip"' | head -n1 | sed 's/.*"\(https[^"]*\)".*/\1/')
+          if [ -z "$url" ]; then
+            url="https://github.com/HTMonkeyG/HTML-Sky/releases/download/${HTML_SDK_VERSION}/htmodloader-${HTML_SDK_VERSION}-sky-7cafc596-261004.zip"
+          fi
+          echo "SDK: $url"
+          curl -fL -o /tmp/htmlsdk.zip "$url"
+          rm -rf /tmp/htmlsdk && mkdir -p /tmp/htmlsdk
+          unzip -q /tmp/htmlsdk.zip -d /tmp/htmlsdk
+          test -f /tmp/htmlsdk/sdk/include/htmodloader/htmod.h
+
+          dest=mod/libraries/htmodloader
+          mkdir -p "$dest/includes/htmodloader/includes" "$dest/includes/imgui-1.92.2b" \
+                   "$dest/includes/cJSON" "$dest/lib"
+          cp -r /tmp/htmlsdk/sdk/include/htmodloader/. "$dest/includes/htmodloader/includes/"
+          cp -r /tmp/htmlsdk/sdk/include/imgui-1.92.2b/. "$dest/includes/imgui-1.92.2b/"
+          cp -r /tmp/htmlsdk/sdk/include/cJSON/. "$dest/includes/cJSON/"
+          cp /tmp/htmlsdk/sdk/lib/htmodloader.lib "$dest/lib/"
+          # SDK 里的 htmod.h 用 "htmodloader/htmodloader.h"，本项目的头文件布局是 "includes/..."
+          sed -i 's|#include "htmodloader/htmodloader.h"|#include "includes/htmodloader.h"|' \
+            "$dest/includes/htmodloader/includes/htmod.h"
+
+      - name: Build
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          cd mod
+          bash build.sh
+          ls -l dist/sky-blueprint.dll
+
+      - name: Package
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          name="${ASSET_NAME%.zip}"
+          rm -rf "$name" "$ASSET_NAME"
+          mkdir -p "$name"
+          cp mod/dist/sky-blueprint.dll "$name/"
+          cp mod/manifest.json "$name/"
+          cp README.md "$name/"
+          zip -r "$ASSET_NAME" "$name"
+          ls -l "$ASSET_NAME"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sky-blueprint-mod
+          path: ${{ env.ASSET_NAME }}
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET_NAME }}
+          generate_release_notes: true
