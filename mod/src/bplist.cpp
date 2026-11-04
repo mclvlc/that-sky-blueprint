@@ -12,6 +12,7 @@
 #include <time.h>
 
 #include "bp.h"          // 先引入 windows.h，shellapi.h 依赖它
+#include "i18n.h"
 
 #define CJSON_HIDE_SYMBOLS
 #include "../libraries/htmodloader/includes/cJSON/cJSON.h"
@@ -669,7 +670,8 @@ void bpListRefresh(void) {
   gSelected = -1;
 
   if (!gDir[0] || !dirExists(gDir)) {
-    snprintf(gStatus, sizeof(gStatus), "Folder not found: %s", gDir[0] ? gDir : "(not set)");
+    snprintf(gStatus, sizeof(gStatus), tr("Folder not found: %s", "目录不存在: %s"),
+             gDir[0] ? gDir : tr("(not set)", "(未设置)"));
     return;
   }
 
@@ -679,7 +681,7 @@ void bpListRefresh(void) {
   WIN32_FIND_DATAA fd;
   HANDLE h = FindFirstFileA(pattern, &fd);
   if (h == INVALID_HANDLE_VALUE) {
-    snprintf(gStatus, sizeof(gStatus), "Scan failed: %s", pattern);
+    snprintf(gStatus, sizeof(gStatus), tr("Scan failed: %s", "扫描失败: %s"), pattern);
     return;
   }
 
@@ -717,7 +719,8 @@ void bpListRefresh(void) {
     }
   }
 
-  snprintf(gStatus, sizeof(gStatus), "%d blueprints  |  %s", gItemCount, gDir);
+  snprintf(gStatus, sizeof(gStatus), tr("%d blueprints  |  %s", "%d 个蓝图  |  %s"),
+           gItemCount, gDir);
   bpLog("blueprint list: %d files in %s", gItemCount, gDir);
 }
 
@@ -834,7 +837,8 @@ static void queueDeploy(const char *blueprint, const char *kind) {
   snprintf(dst, sizeof(dst), "%s\\deploy_queue.json", gCtx.dataFolder);
   FILE *f = fopen(tmp, "wb");
   if (!f) {
-    snprintf(gDeployStatus, sizeof(gDeployStatus), "Cannot write deploy queue");
+    snprintf(gDeployStatus, sizeof(gDeployStatus),
+             tr("Cannot write deploy queue", "无法写入部署队列"));
     return;
   }
   fprintf(f,
@@ -844,7 +848,8 @@ static void queueDeploy(const char *blueprint, const char *kind) {
   fclose(f);
   MoveFileExA(tmp, dst, MOVEFILE_REPLACE_EXISTING);
   snprintf(gDeployStatus, sizeof(gDeployStatus),
-           "Queued. Waiting for deployd.py...");
+           tr("Queued. Waiting for deployd.py...",
+              "已加入队列，等待 deployd.py..."));
   bpLog("deploy queued: %s", blueprint);
 }
 
@@ -868,7 +873,8 @@ static void sessionInfo(char *out, size_t n) {
   snprintf(path, sizeof(path), "%s\\session.json", gCtx.dataFolder);
   FILE *f = fopen(path, "rb");
   if (!f) {
-    snprintf(out, n, "session: not captured yet (open a recording once)");
+    snprintf(out, n, tr("session: not captured yet (open a recording once)",
+                        "尚未抓到会话（先打开一次留影/留言）"));
     return;
   }
   char buf[512] = {0};
@@ -906,7 +912,9 @@ static void sessionInfo(char *out, size_t n) {
     if (pool[0] && strcmp(pool, "-") != 0)
       snprintf(gDeployPool, sizeof(gDeployPool), "%s", pool);
   }
-  snprintf(out, n, "session: user=%s  level=%s  pool=%s", user, level, pool);
+  snprintf(out, n, tr("session: user=%s  level=%s  pool=%s",
+                      "会话: user=%s  level=%s  pool=%s"),
+           user, level, pool);
 }
 
 void bpListUI(void) {
@@ -964,20 +972,22 @@ void bpListUI(void) {
   ImGui::SetNextItemWidth(-330);
   ImGui::InputText("##dir", gDirEdit, sizeof(gDirEdit));
   ImGui::SameLine();
-  if (ImGui::Button("Apply")) {
+  if (ImGui::Button(tr("Apply", "应用"))) {
     snprintf(gDir, sizeof(gDir), "%s", gDirEdit);
     saveConfig();
     bpListRefresh();
   }
   ImGui::SameLine();
-  if (ImGui::Button("Refresh"))
+  if (ImGui::Button(tr("Refresh", "刷新")))
     bpListRefresh();
   ImGui::SameLine();
-  if (ImGui::Button("Open folder"))
+  if (ImGui::Button(tr("Open folder", "打开目录")))
     openFolder(gDir);
 
   ImGui::SetNextItemWidth(260);
-  ImGui::InputTextWithHint("##filter", "filter: stid / kind / file", gFilter, sizeof(gFilter));
+  ImGui::InputTextWithHint("##filter",
+    tr("filter: stid / kind / file", "筛选: stid / 类型 / 文件"),
+    gFilter, sizeof(gFilter));
   ImGui::SameLine();
   ImGui::TextDisabled("%s", gStatus);
 
@@ -991,15 +1001,15 @@ void bpListUI(void) {
   gVisible = 0;
   if (ImGui::BeginTable("##bplist", 9, flags, ImVec2(0, 250))) {
     ImGui::TableSetupScrollFreeze(0, 1);
-    ImGui::TableSetupColumn("NOTE", ImGuiTableColumnFlags_WidthFixed, 130);
-    ImGui::TableSetupColumn("TIME", ImGuiTableColumnFlags_WidthFixed, 100);
-    ImGui::TableSetupColumn("SEC", ImGuiTableColumnFlags_WidthFixed, 44);
+    ImGui::TableSetupColumn(tr("NOTE", "备注"), ImGuiTableColumnFlags_WidthFixed, 130);
+    ImGui::TableSetupColumn(tr("TIME", "时间"), ImGuiTableColumnFlags_WidthFixed, 100);
+    ImGui::TableSetupColumn(tr("SEC", "秒"), ImGuiTableColumnFlags_WidthFixed, 44);
     ImGui::TableSetupColumn("ID", ImGuiTableColumnFlags_WidthFixed, 130);
-    ImGui::TableSetupColumn("KIND", ImGuiTableColumnFlags_WidthFixed, 68);
-    ImGui::TableSetupColumn("CHUNK", ImGuiTableColumnFlags_WidthFixed, 44);
-    ImGui::TableSetupColumn("NT", ImGuiTableColumnFlags_WidthFixed, 40);
-    ImGui::TableSetupColumn("SIZE", ImGuiTableColumnFlags_WidthFixed, 50);
-    ImGui::TableSetupColumn("FILE", ImGuiTableColumnFlags_WidthStretch, 1);
+    ImGui::TableSetupColumn(tr("KIND", "类型"), ImGuiTableColumnFlags_WidthFixed, 68);
+    ImGui::TableSetupColumn(tr("CHUNK", "分块"), ImGuiTableColumnFlags_WidthFixed, 44);
+    ImGui::TableSetupColumn(tr("NT", "音符"), ImGuiTableColumnFlags_WidthFixed, 40);
+    ImGui::TableSetupColumn(tr("SIZE", "大小"), ImGuiTableColumnFlags_WidthFixed, 50);
+    ImGui::TableSetupColumn(tr("FILE", "文件"), ImGuiTableColumnFlags_WidthStretch, 1);
     ImGui::TableHeadersRow();
 
     for (int i = 0; i < gItemCount; i++) {
@@ -1052,7 +1062,7 @@ void bpListUI(void) {
   }
 
   if (gVisible != gItemCount)
-    ImGui::TextDisabled("Showing %d / %d", gVisible, gItemCount);
+    ImGui::TextDisabled(tr("Showing %d / %d", "显示 %d / %d"), gVisible, gItemCount);
 
   // 详情
   ImGui::Separator();
@@ -1060,34 +1070,36 @@ void bpListUI(void) {
     BpListItem *it = &gItems[gSelected];
     ImGui::TextUnformatted(it->file);
     if (it->valid) {
-      ImGui::Text("kind=%s  %.1fs  chunks=%d  notes=%d  anims=%d  placeables=%d  players=%d",
+      ImGui::Text(tr("kind=%s  %.1fs  chunks=%d  notes=%d  anims=%d  placeables=%d  players=%d",
+                     "类型=%s  %.1fs  分块=%d  音符=%d  动画=%d  物件=%d  玩家=%d"),
         it->kind, it->duration, it->chunks, it->notes, it->anims,
         it->placeables, it->players);
-      ImGui::Text("stid: %s  (format %d, %.1f KB)",
+      ImGui::Text(tr("stid: %s  (format %d, %.1f KB)", "stid: %s  (格式 %d, %.1f KB)"),
         it->stid, it->format, (double)it->size / 1024.0);
       if (it->created[0])
-        ImGui::Text("created: %s", it->created);
+        ImGui::Text(tr("created: %s", "创建: %s"), it->created);
       if (it->viewTime > 0)
-        ImGui::Text("last viewed: %s", it->timeStr);
+        ImGui::Text(tr("last viewed: %s", "最近查看: %s"), it->timeStr);
       if (it->source[0])
-        ImGui::TextWrapped("source: %s", it->source);
+        ImGui::TextWrapped(tr("source: %s", "来源: %s"), it->source);
 
       ImGui::Separator();
-      ImGui::TextDisabled("Note (saved to notes.json)");
+      ImGui::TextDisabled(tr("Note (saved to notes.json)", "备注（保存到 notes.json）"));
       ImGui::SetNextItemWidth(360);
-      ImGui::InputTextWithHint("##note", "add a note...", gNoteEdit, sizeof(gNoteEdit));
+      ImGui::InputTextWithHint("##note", tr("add a note...", "添加备注..."),
+                               gNoteEdit, sizeof(gNoteEdit));
       if (ImGui::IsItemDeactivatedAfterEdit()) {
         snprintf(it->note, sizeof(it->note), "%s", gNoteEdit);
         saveNotes();
       }
       ImGui::SameLine();
-      if (ImGui::Button("Save note")) {
+      if (ImGui::Button(tr("Save note", "保存备注"))) {
         snprintf(it->note, sizeof(it->note), "%s", gNoteEdit);
         saveNotes();
       }
 
       if (it->placCount) {
-        ImGui::Text("placeables:");
+        ImGui::Text(tr("placeables:", "物件:"));
         for (int i = 0; i < it->placCount; i++)
           ImGui::BulletText("%s", it->plac[i]);
       }
@@ -1116,23 +1128,24 @@ void bpListUI(void) {
       }
 
       ImGui::Separator();
-      ImGui::TextDisabled("Deploy (recording: new recording; shared_space: new space + props)");
+      ImGui::TextDisabled(tr("Deploy (recording: new recording; shared_space: new space + props)",
+                             "部署（留影=新留影；共享空间=新空间+物件；留言=新留言）"));
       ImGui::SetNextItemWidth(240);
-      ImGui::InputText("Message", gDeployMsg, sizeof(gDeployMsg));
+      ImGui::InputText(tr("Message", "消息"), gDeployMsg, sizeof(gDeployMsg));
       ImGui::SetNextItemWidth(240);
-      ImGui::InputText("Pos", gDeployPos, sizeof(gDeployPos));
+      ImGui::InputText(tr("Pos", "位置"), gDeployPos, sizeof(gDeployPos));
       ImGui::SetNextItemWidth(240);
-      ImGui::InputText("Ori", gDeployOri, sizeof(gDeployOri));
+      ImGui::InputText(tr("Ori", "朝向"), gDeployOri, sizeof(gDeployOri));
       ImGui::SetNextItemWidth(240);
-      if (ImGui::InputText("Level", gDeployLevel, sizeof(gDeployLevel)))
+      if (ImGui::InputText(tr("Level", "地图"), gDeployLevel, sizeof(gDeployLevel)))
         gDeployEdited = 1;
       ImGui::SetNextItemWidth(240);
-      if (ImGui::InputText("Pool", gDeployPool, sizeof(gDeployPool)))
+      if (ImGui::InputText(tr("Pool", "池类型"), gDeployPool, sizeof(gDeployPool)))
         gDeployEdited = 1;
-      if (ImGui::Button("Deploy"))
+      if (ImGui::Button(tr("Deploy", "部署")))
         queueDeploy(it->path, it->kind);
       ImGui::SameLine();
-      if (ImGui::Button("Refresh status")) {
+      if (ImGui::Button(tr("Refresh status", "刷新状态"))) {
         loadDeployStatus();
         sessionInfo(gSessInfo, sizeof(gSessInfo));
       }
@@ -1142,17 +1155,18 @@ void bpListUI(void) {
         ImGui::TextWrapped("%s", gDeployStatus);
 
       ImGui::Separator();
-      if (ImGui::Button("Copy path"))
+      if (ImGui::Button(tr("Copy path", "复制路径")))
         ImGui::SetClipboardText(it->path);
       ImGui::SameLine();
-      if (ImGui::Button("Reload"))
+      if (ImGui::Button(tr("Reload", "重新加载")))
         parseBlueprint(it);
     } else {
       ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f),
-                         "Error: %s", it->error[0] ? it->error : "unknown");
+                         tr("Error: %s", "错误: %s"),
+                         it->error[0] ? it->error : tr("unknown", "未知"));
       ImGui::TextWrapped("%s", it->path);
     }
   } else {
-    ImGui::TextDisabled("Select a row for details");
+    ImGui::TextDisabled(tr("Select a row for details", "选择一行查看详情"));
   }
 }

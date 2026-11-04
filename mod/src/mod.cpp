@@ -4,6 +4,7 @@
 #include <string.h>
 #include "includes/htmod.h"
 #include "bp.h"
+#include "i18n.h"
 
 static i32 gModLoaded = 0;
 static CRITICAL_SECTION gLogLock;
@@ -224,6 +225,8 @@ extern "C" __declspec(dllexport) HTStatus HTMLAPI HTModOnInit(
   gLogLockInit = 1;
 
   openLogFile();
+  bpI18nInit();
+  bpLog("ui lang=%d", gUiLang);
 
   if (!checkLoaderVersion()) {
     bpLog("ERROR: HT mod loader >= 1.8.1 required");
@@ -274,12 +277,50 @@ extern "C" __declspec(dllexport) HTStatus HTMLAPI HTModOnDisable(void *) {
   return HT_SUCCESS;
 }
 
+// ImGui 默认字体没有中文字形，备注/留言文本会显示成 "?"。
+// 从系统字体目录加载一个简体中文字体作为默认字体（只尝试一次）。
+static void ensureCjkFont(void) {
+  static int tried = 0;
+  if (tried) return;
+  tried = 1;
+
+  ImGuiIO &io = ImGui::GetIO();
+  static const char *cands[] = {
+    "C:\\Windows\\Fonts\\msyh.ttc",     // 微软雅黑
+    "C:\\Windows\\Fonts\\msyhbd.ttc",
+    "C:\\Windows\\Fonts\\Deng.ttf",     // 等线
+    "C:\\Windows\\Fonts\\simhei.ttf",   // 黑体
+    "C:\\Windows\\Fonts\\simsun.ttc",   // 宋体
+  };
+  for (size_t i = 0; i < sizeof(cands) / sizeof(cands[0]); i++) {
+    FILE *f = fopen(cands[i], "rb");
+    if (!f) continue;
+    fclose(f);
+
+    ImFontConfig cfg;
+    cfg.OversampleH = 2;
+    cfg.OversampleV = 2;
+    cfg.PixelSnapH = true;
+    ImFont *font = io.Fonts->AddFontFromFileTTF(
+      cands[i], 17.0f, &cfg,
+      io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
+    if (font) {
+      io.FontDefault = font;
+      bpLog("cjk font loaded: %s", cands[i]);
+      return;
+    }
+  }
+  bpLog("cjk font: no system Chinese font found");
+}
+
 extern "C" __declspec(dllexport) void HTMLAPI HTModRenderGui(
   f32 timeElapesed,
   void *reserved
 ) {
   if (!gModLoaded)
     return;
+
+  ensureCjkFont();
 
   static i32 prevPressed = 0;
   if (gHotkeyToggle != HT_INVALID_HANDLE) {
