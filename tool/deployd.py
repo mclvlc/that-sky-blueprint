@@ -30,6 +30,12 @@ SESSION = os.path.join(DATA_DIR, "session.json")
 RESULT_TXT = os.path.join(DATA_DIR, "deploy_result.txt")
 RESULT_JSON = os.path.join(DATA_DIR, "deploy_result.json")
 
+# 服务器地址由 mod 写在 server.txt（国际服来自 AppInfo.tgc，国服来自抓包）
+if not deploy.BASE:
+    _host = bpdata.server_host("steam")
+    if _host:
+        deploy.BASE = "https://" + _host
+
 
 def emit(*parts):
     print(*parts, flush=True)

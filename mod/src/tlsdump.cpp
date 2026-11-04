@@ -102,6 +102,9 @@ static char gSessUser[80] = {0};
 static char gSessToken[96] = {0};
 static char gSessLevel[128] = {0};
 static char gSessPool[64] = {0};
+static char gSessHost[128] = {0};       // 当前连接的服务器（官服/私服会自动切）
+static char gSessSkyLevel[32] = {0};    // x-sky-level-id
+static char gSessSessionId[80] = {0};   // X-Session-ID
 
 static const char *memFind(const char *hay, u32 n, const char *needle) {
   u32 m = (u32)strlen(needle);
@@ -131,10 +134,10 @@ static i32 copyValue(const char *buf, u32 len, const char *prefix,
 }
 
 static void saveSessionIfChanged(void) {
-  static char last[512] = {0};
-  char sig[512];
-  snprintf(sig, sizeof(sig), "%s|%s|%s|%s",
-           gSessUser, gSessToken, gSessLevel, gSessPool);
+  static char last[768] = {0};
+  char sig[768];
+  snprintf(sig, sizeof(sig), "%s|%s|%s|%s|%s|%s",
+           gSessUser, gSessToken, gSessLevel, gSessPool, gSessHost, gSessSkyLevel);
   if (strcmp(sig, last) == 0) return;
   if (!gCtx.dataFolder[0]) return;
 
@@ -143,18 +146,53 @@ static void saveSessionIfChanged(void) {
   FILE *f = fopen(path, "w");
   if (!f) return;
   fprintf(f,
-    "{\"user\":\"%s\",\"session\":\"%s\",\"level\":\"%s\",\"pool_type\":\"%s\",\"updated\":%lld}\n",
+    "{\"user\":\"%s\",\"session\":\"%s\",\"level\":\"%s\",\"pool_type\":\"%s\","
+    "\"host\":\"%s\",\"sky_level_id\":\"%s\",\"session_id\":\"%s\",\"updated\":%lld}\n",
     gSessUser, gSessToken, gSessLevel, gSessPool,
+    gSessHost, gSessSkyLevel, gSessSessionId,
     (long long)GetTickCount64());
   fclose(f);
   strncpy(last, sig, sizeof(last) - 1);
+
+  // server.txt 兜底：AppInfo.tgc 没写出来时，用抓到的 Host
+  if (gSessHost[0]) {
+    char spath[MAX_PATH];
+    snprintf(spath, sizeof(spath), "%s\\server.txt", gCtx.dataFolder);
+    int have = 0;
+    FILE *sf = fopen(spath, "rb");
+    if (sf) {
+      char buf[8] = {0};
+      if (fgets(buf, sizeof(buf), sf) && buf[0] && buf[0] != '\n' && buf[0] != '\r')
+        have = 1;
+      fclose(sf);
+    }
+    if (!have)
+      bpWriteServerHost(gSessHost);
+  }
+
   // 不记录 token 本身
-  bpLog("session captured: user=%s level=%s pool=%s",
-        gSessUser, gSessLevel, gSessPool);
+  bpLog("session captured: user=%s host=%s level=%s pool=%s",
+        gSessUser, gSessHost, gSessLevel, gSessPool);
 }
 
 static void captureSession(const char *buf, u32 len) {
   char v[128];
+
+  if (copyValue(buf, len, "\r\nHost: ", v, sizeof(v)) ||
+      copyValue(buf, len, "\r\nhost: ", v, sizeof(v))) {
+    strncpy(gSessHost, v, sizeof(gSessHost) - 1);
+    gSessHost[sizeof(gSessHost) - 1] = 0;
+  }
+  if (copyValue(buf, len, "\r\nx-sky-level-id: ", v, sizeof(v)) ||
+      copyValue(buf, len, "\r\nX-Sky-Level-Id: ", v, sizeof(v))) {
+    strncpy(gSessSkyLevel, v, sizeof(gSessSkyLevel) - 1);
+    gSessSkyLevel[sizeof(gSessSkyLevel) - 1] = 0;
+  }
+  if (copyValue(buf, len, "\r\nX-Session-ID: ", v, sizeof(v)) ||
+      copyValue(buf, len, "\r\nx-session-id: ", v, sizeof(v))) {
+    strncpy(gSessSessionId, v, sizeof(gSessSessionId) - 1);
+    gSessSessionId[sizeof(gSessSessionId) - 1] = 0;
+  }
 
   if (copyValue(buf, len, "\r\nsession: ", v, sizeof(v)) ||
       copyValue(buf, len, "\r\nx-session-token: ", v, sizeof(v)) ||

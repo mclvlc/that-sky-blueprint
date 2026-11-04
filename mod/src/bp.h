@@ -80,6 +80,9 @@ void bpLog(const char *fmt, ...);
 // 调试抓包限流：idx 从 1 开始，超过 cap 就不再落盘（避免几千个 bin 文件）
 int bpDumpOk(unsigned idx, unsigned cap);
 
+// 当前连接的服务器地址（写到 <data>/server.txt，Python 部署工具会读）
+void bpWriteServerHost(const char *host);
+
 // UI
 void bpUIWindowMain(void);
 

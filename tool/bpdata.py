@@ -55,6 +55,16 @@ def candidates(name, edition="steam", sub=""):
     return out
 
 
+def server_host(edition="steam"):
+    """mod 写出的当前服务器地址（国际服来自 data/AppInfo.tgc，国服来自抓包）。"""
+    path = os.path.join(data_dir(edition), "server.txt")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.readline().strip()
+    except Exception:
+        return ""
+
+
 def find(name, edition="steam", sub=""):
     """返回第一个已存在的路径；都不存在时返回数据目录下的目标路径。"""
     cands = candidates(name, edition, sub)

@@ -107,9 +107,20 @@ CN=2 bash build.sh         # 国服（只读抓取）
 
 启动游戏，按 **F2** 打开面板。
 
-### 3. 配置服务器地址
+### 3. 服务器地址（自动识别）
 
-服务器地址不写死，需要自己指定（部署用）：
+mod 启动时会自己确定部署地址，写到 `%APPDATA%\sky-blueprint\<steam|cn>\server.txt`：
+
+- **国际服**：读 `<游戏目录>\data\AppInfo.tgc` 的第二行（客户端实际连接的服务器）
+- **国服**：客户端地址由网易固定，mod 直接使用实际请求里的 `Host`
+
+Python 工具的解析顺序：
+
+```
+--host > SKY_SERVER > server.txt > session.json.host > tool/server.json
+```
+
+切换官服/私服后重启游戏即可，不用改配置。读不到 AppInfo 时可以手动指定：
 
 ```powershell
 $env:SKY_SERVER = "https://your.server"
@@ -224,6 +235,7 @@ mod 不会往安装目录写运行文件，全部落在：
 - **共享空间是整份覆盖**：`stage/api/v1/set` 会替换该 stage 上的全部物件，不能追加；部署前先保存现有空间。
 - **只能写自己的空间**：stage 按 `stage_id + user_id` 存。复制别人的空间要加 `--force`，且会写进你自己的空间。
 - **stage 坐标是局部的**：物件坐标相对 stage 原点，只能写回同名 `stage_id`（同一张地图的同一位置）；新建入口的位置由 `--pos` 决定。
+- **跨服 sequence 不一致**：蓝图里的 `sequence` 是来源服务器的值，工具会先读目标服当前 `sequence/version` 再写入，直接发会得到 `400 Invalid Request`。
 - **新建入口可能受限**：`social-feed/api/v1/create` 带 `do_payment:true`，服务器可能限制每日次数或消耗货币。
 - **国服部署未完成**：国服只做了抓取，创建/发布流程尚未打通。
 - **抓包会上限**：调试抓包默认限流（写请求除外），不是完整流量记录。

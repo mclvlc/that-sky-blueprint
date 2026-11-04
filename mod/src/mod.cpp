@@ -85,6 +85,78 @@ int bpDumpOk(unsigned idx, unsigned cap) {
   return idx > 0 && idx <= cap;
 }
 
+// ---------------------------------------------------------------------------
+// 服务器地址
+//
+// 国际服：启动时读 <游戏目录>\data\AppInfo.tgc 的第二行（非空行计数），
+//         这一行就是客户端实际连接的服务器地址。
+// 国服：地址由网易固定，读不到也不该改；用抓到的 Host（cnlive 写 server.txt）。
+// 结果写到 <data>\server.txt，Python 工具部署时直接读。
+// ---------------------------------------------------------------------------
+void bpWriteServerHost(const char *host) {
+  if (!gCtx.dataFolder[0] || !host || !host[0]) return;
+  char path[MAX_PATH];
+  snprintf(path, sizeof(path), "%s\\server.txt", gCtx.dataFolder);
+  FILE *f = fopen(path, "w");
+  if (f) {
+    fprintf(f, "%s\n", host);
+    fclose(f);
+  }
+}
+
+static void readAppInfoHost(void) {
+#if BP_CN_LIVE || BP_CN_DIAG
+  bpLog("server: CN build (host captured from traffic)");
+  return;
+#else
+  char exe[MAX_PATH];
+  if (!GetModuleFileNameA(NULL, exe, sizeof(exe))) return;
+  char *slash = strrchr(exe, '\\');
+  if (slash) *slash = 0;
+
+  char path[MAX_PATH];
+  snprintf(path, sizeof(path), "%s\\data\\AppInfo.tgc", exe);
+  FILE *f = fopen(path, "rb");
+  if (!f) {
+    bpLog("server: AppInfo.tgc not found (%s)", path);
+    return;
+  }
+
+  char line[512];
+  int n = 0;
+  char host[256] = {0};
+  while (fgets(line, sizeof(line), f)) {
+    size_t len = strlen(line);
+    while (len && (line[len - 1] == '\r' || line[len - 1] == '\n' ||
+                   line[len - 1] == ' ' || line[len - 1] == '\t'))
+      line[--len] = 0;
+    char *s = line;
+    while (*s == ' ' || *s == '\t') s++;
+    if (!*s) continue;
+    if (++n == 2) {
+      strncpy(host, s, sizeof(host) - 1);
+      break;
+    }
+  }
+  fclose(f);
+  if (!host[0]) {
+    bpLog("server: AppInfo.tgc has no second line");
+    return;
+  }
+
+  // 允许 "https://host/path" 这种写法，只取 host
+  char *p = host;
+  if (strncmp(p, "https://", 8) == 0) p += 8;
+  else if (strncmp(p, "http://", 7) == 0) p += 7;
+  char *e = p;
+  while (*e && *e != '/' && *e != ' ' && *e != '\t') e++;
+  *e = 0;
+
+  bpWriteServerHost(p);
+  bpLog("server: AppInfo.tgc -> %s", p);
+#endif
+}
+
 static void openLogFile(void) {
   initFolders();
   FILE *f = fopen(gLogPath, "w");
@@ -176,6 +248,7 @@ extern "C" __declspec(dllexport) HTStatus HTMLAPI HTModOnInit(
   bpLog("sky-blueprint v" BP_VERSION " init ok");
   bpLog("mod=%s", gCtx.modFolder);
   bpLog("data=%s", gCtx.dataFolder[0] ? gCtx.dataFolder : "(mod folder)");
+  readAppInfoHost();
   bpLog("game base=%p pid=%lu edition=%d", gCtx.gameBase, gCtx.pid, (int)gCtx.edition);
   bpLog("loader=%s v%u", gCtx.loaderName, gCtx.loaderVersion);
 

@@ -275,9 +275,6 @@ def main():
     global BASE, UA, X_LEVEL, X_SESSION_ID
     if args.host:
         BASE = "https://" + args.host
-    if not BASE:
-        print("缺少服务器地址：用 --host your.server 或设置环境变量 SKY_SERVER")
-        return 2
     if args.ua:
         UA = args.ua
     X_LEVEL = args.x_sky_level_id
@@ -286,6 +283,21 @@ def main():
     user, session = load_session(args)
     if not user or not session:
         print("缺少 --user / --session（或 tool/session.json）")
+        return 2
+
+    # 服务器地址：--host > SKY_SERVER > mod 写的 server.txt > session.json.host
+    if not BASE:
+        host = bpdata.server_host("steam")
+        if not host:
+            try:
+                with open(SESSION_FILE, encoding="utf-8") as f:
+                    host = json.load(f).get("host") or ""
+            except Exception:
+                host = ""
+        if host:
+            BASE = "https://" + host
+    if not BASE:
+        print("缺少服务器地址：用 --host，或让 mod 抓到 server.txt")
         return 2
 
     res = deploy_blueprint(

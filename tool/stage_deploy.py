@@ -66,6 +66,9 @@ def resolve_host(host):
     env = os.environ.get("SKY_SERVER")
     if env:
         return env
+    h = bpdata.server_host("steam")
+    if h:
+        return h
     try:
         with open(CONFIG, encoding="utf-8") as f:
             h = json.load(f).get("host")
@@ -222,6 +225,23 @@ def deploy(blueprint, host, dry_run=False, force=False, verify=False,
     if not base.startswith("http"):
         base = "https://" + base
 
+    # sequence/version 必须和服务器当前值一致（官服/私服各自计数）。
+    # 蓝图里带的是来源服务器的值，直接发会被 400 Invalid Request。
+    if not dry_run:
+        cur = api(base, "/service/stage/api/v1/get",
+                  {"user": user, "user_id": user, "session": session,
+                   "stage_id": stage_id, "level_id": level, "updated_at": ""},
+                  user, session)
+        if cur.get("_http") == 200 and isinstance(cur.get("sequence"), (int, float)):
+            old = payload["sequence"]
+            payload["sequence"] = int(cur["sequence"])
+            payload["version"] = int(cur.get("version") or 0)
+            cur_props = len(cur.get("props") or [])
+            print("  服务器当前: sequence=%s props=%d%s"
+                  % (payload["sequence"], cur_props,
+                     "" if old == payload["sequence"]
+                     else "  (蓝图 %s)" % old))
+
     res = api(base, "/service/stage/api/v1/set", payload, user, session, dry_run)
     print("  set -> HTTP %s  %s" % (res.get("_http"), json.dumps(res, ensure_ascii=False)[:300]))
     if res.get("_http") != 200 or res.get("status") not in (None, "OK"):
@@ -239,7 +259,7 @@ def deploy(blueprint, host, dry_run=False, force=False, verify=False,
             return 1
 
     if verify and not dry_run:
-        q = {"user": user, "user_id": owner or user, "session": session,
+        q = {"user": user, "user_id": user, "session": session,
              "stage_id": stage_id, "level_id": level, "updated_at": ""}
         got = api(base, "/service/stage/api/v1/get", q, user, session)
         props = got.get("props") or []

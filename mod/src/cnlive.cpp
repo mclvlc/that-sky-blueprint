@@ -183,6 +183,9 @@ static void saveSession(void) {
     gUser, gSess, gLevel, gPool, gHost, (long long)GetTickCount64());
   fclose(f);
   strncpy(gLastSession, sig, sizeof(gLastSession) - 1);
+  // 国服地址由网易固定，直接把抓到的 Host 交给部署工具
+  if (gHost[0])
+    bpWriteServerHost(gHost);
   bpLog("CN session: user=%s level=%s pool=%s host=%s",
         gUser, gLevel, gPool, gHost);
 }
