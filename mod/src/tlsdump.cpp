@@ -213,8 +213,26 @@ static int isPidKey(const char *k) {
   return p[0] == 'i' && p[1] == 'd' && p[2] == 0;
 }
 
-static void mergeFeedMeta(const char *resource, cJSON *extra) {
-  if (!resource || !resource[0] || !cJSON_IsObject(extra))
+static int copyStrField(cJSON *entry, cJSON *src, const char *key) {
+  cJSON *v = src ? cJSON_GetObjectItemCaseSensitive(src, key) : NULL;
+  if (!cJSON_IsString(v) || !v->valuestring || !v->valuestring[0])
+    return 0;
+  cJSON_DeleteItemFromObjectCaseSensitive(entry, key);
+  cJSON_AddStringToObject(entry, key, v->valuestring);
+  return 1;
+}
+
+static int copyNumField(cJSON *entry, cJSON *src, const char *key) {
+  cJSON *v = src ? cJSON_GetObjectItemCaseSensitive(src, key) : NULL;
+  if (!cJSON_IsNumber(v))
+    return 0;
+  cJSON_DeleteItemFromObjectCaseSensitive(entry, key);
+  cJSON_AddNumberToObject(entry, key, v->valuedouble);
+  return 1;
+}
+
+static void mergeFeedMeta(const char *resource, cJSON *feed, cJSON *extra) {
+  if (!resource || !resource[0])
     return;
   if (!gFeedLockReady)
     return;
@@ -255,15 +273,31 @@ static void mergeFeedMeta(const char *resource, cJSON *extra) {
 
   int changed = 0;
   cJSON *it = NULL;
-  cJSON_ArrayForEach(it, extra) {
-    if (!cJSON_IsString(it) || !it->string || !it->valuestring)
-      continue;
-    if (!isPidKey(it->string))
-      continue;
-    cJSON_DeleteItemFromObjectCaseSensitive(entry, it->string);
-    cJSON_AddStringToObject(entry, it->string, it->valuestring);
-    changed = 1;
+  if (cJSON_IsObject(extra)) {
+    cJSON_ArrayForEach(it, extra) {
+      if (!cJSON_IsString(it) || !it->string || !it->valuestring)
+        continue;
+      if (!isPidKey(it->string))
+        continue;
+      cJSON_DeleteItemFromObjectCaseSensitive(entry, it->string);
+      cJSON_AddStringToObject(entry, it->string, it->valuestring);
+      changed = 1;
+    }
   }
+
+  // 留影 / 共享空间的类型信息：部署和蓝图分类都要用
+  static const char *feedStrKeys[] = {
+    "pool_type", "pool_name", "level_id", "social_feed_id",
+    "author_id", "message", "content",
+  };
+  for (size_t i = 0; i < sizeof(feedStrKeys) / sizeof(feedStrKeys[0]); i++)
+    changed |= copyStrField(entry, feed, feedStrKeys[i]);
+
+  static const char *extraStrKeys[] = { "pos", "ori", "scale" };
+  for (size_t i = 0; i < sizeof(extraStrKeys) / sizeof(extraStrKeys[0]); i++)
+    changed |= copyStrField(entry, extra, extraStrKeys[i]);
+
+  changed |= copyNumField(entry, extra, "chunk_count");
 
   if (changed) {
     char *s = cJSON_PrintUnformatted(root);
@@ -283,6 +317,74 @@ static void mergeFeedMeta(const char *resource, cJSON *extra) {
   LeaveCriticalSection(&gFeedLock);
 }
 
+// 共享空间入口的位置：SharedSpaceCandle feed 的 extra_data.pos 就是空间在
+// 世界里的坐标。按作者存一份，部署新空间时可以直接沿用。
+static void mergeSpacePos(const char *owner, cJSON *feed, cJSON *extra) {
+  if (!owner || !owner[0] || !gCtx.dataFolder[0])
+    return;
+  cJSON *pos = cJSON_GetObjectItemCaseSensitive(extra, "pos");
+  if (!cJSON_IsString(pos) || !pos->valuestring || !pos->valuestring[0])
+    return;
+  if (!gFeedLockReady)
+    return;
+
+  char path[MAX_PATH], tmp[MAX_PATH];
+  snprintf(path, sizeof(path), "%s\\space_pos.json", gCtx.dataFolder);
+  snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+
+  EnterCriticalSection(&gFeedLock);
+  cJSON *root = NULL;
+  FILE *f = fopen(path, "rb");
+  if (f) {
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    rewind(f);
+    if (n > 0 && n < 1024 * 1024) {
+      char *data = (char *)malloc((size_t)n + 1);
+      if (data) {
+        size_t got = fread(data, 1, (size_t)n, f);
+        data[got] = 0;
+        root = cJSON_Parse(data);
+        free(data);
+      }
+    }
+    fclose(f);
+  }
+  if (!cJSON_IsObject(root)) {
+    if (root) cJSON_Delete(root);
+    root = cJSON_CreateObject();
+  }
+
+  cJSON *entry = cJSON_GetObjectItemCaseSensitive(root, owner);
+  if (!cJSON_IsObject(entry)) {
+    cJSON_DeleteItemFromObjectCaseSensitive(root, owner);
+    entry = cJSON_CreateObject();
+    cJSON_AddItemToObject(root, owner, entry);
+  }
+  copyStrField(entry, extra, "pos");
+  copyStrField(entry, extra, "ori");
+  copyStrField(entry, feed, "level_id");
+  copyStrField(entry, feed, "message");
+  copyStrField(entry, feed, "social_feed_id");
+
+  char *s = cJSON_PrintUnformatted(root);
+  FILE *w = fopen(tmp, "wb");
+  if (w) {
+    if (s) fputs(s, w);
+    fclose(w);
+    MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING);
+  }
+  if (s) cJSON_free(s);
+  cJSON_Delete(root);
+  LeaveCriticalSection(&gFeedLock);
+}
+
+static int isSpacePool(cJSON *feed) {
+  cJSON *pool = cJSON_GetObjectItemCaseSensitive(feed, "pool_type");
+  return cJSON_IsString(pool) && pool->valuestring &&
+         strncmp(pool->valuestring, "SharedSpace", 11) == 0;
+}
+
 static void captureFeedFromJson(cJSON *root) {
   if (!cJSON_IsObject(root))
     return;
@@ -300,7 +402,12 @@ static void captureFeedFromJson(cJSON *root) {
       if (!cJSON_IsString(res))
         res = cJSON_GetObjectItemCaseSensitive(f, "resource_id");
       if (cJSON_IsString(res) && res->valuestring)
-        mergeFeedMeta(res->valuestring, extra);
+        mergeFeedMeta(res->valuestring, f, extra);
+      if (isSpacePool(f) && cJSON_IsObject(extra)) {
+        cJSON *author = cJSON_GetObjectItemCaseSensitive(f, "author_id");
+        if (cJSON_IsString(author) && author->valuestring)
+          mergeSpacePos(author->valuestring, f, extra);
+      }
     }
     return;
   }
@@ -310,7 +417,74 @@ static void captureFeedFromJson(cJSON *root) {
   if (cJSON_IsObject(extra))
     res = cJSON_GetObjectItemCaseSensitive(extra, "resource_id");
   if (cJSON_IsString(res) && res->valuestring)
-    mergeFeedMeta(res->valuestring, extra);
+    mergeFeedMeta(res->valuestring, root, extra);
+  if (isSpacePool(root) && cJSON_IsObject(extra)) {
+    cJSON *author = cJSON_GetObjectItemCaseSensitive(root, "author_id");
+    if (cJSON_IsString(author) && author->valuestring)
+      mergeSpacePos(author->valuestring, root, extra);
+  }
+}
+
+// 共享空间：stage/api/v1/get 返回的文档
+// {"status":"OK","stage_id":"DuskStart_CNDL","level_id":"DuskStart",
+//  "user_id":"<owner>","sequence":1,"version":0,
+//  "props":[{"name":"CharSkyKid_Prop_...","pos":"(x,y,z)","ori":"(x,y,z,w)",
+//            "scale":"(1,1,1)","uniqueID":6,...}]}
+static void sanitizeName(const char *in, char *out, size_t n) {
+  size_t j = 0;
+  for (size_t i = 0; in && in[i] && j + 1 < n; i++) {
+    char c = in[i];
+    int ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+             (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.';
+    out[j++] = ok ? c : '_';
+  }
+  out[j] = 0;
+}
+
+static void captureStageFromJson(cJSON *root) {
+  if (!cJSON_IsObject(root) || !gCtx.dataFolder[0])
+    return;
+  cJSON *sid = cJSON_GetObjectItemCaseSensitive(root, "stage_id");
+  cJSON *props = cJSON_GetObjectItemCaseSensitive(root, "props");
+  if (!cJSON_IsString(sid) || !sid->valuestring || !sid->valuestring[0])
+    return;
+  if (!cJSON_IsArray(props))
+    return;
+
+  cJSON *uid = cJSON_GetObjectItemCaseSensitive(root, "user_id");
+  const char *owner = (cJSON_IsString(uid) && uid->valuestring && uid->valuestring[0])
+                      ? uid->valuestring : "unknown";
+
+  char dir[MAX_PATH];
+  snprintf(dir, sizeof(dir), "%s\\stages", gCtx.dataFolder);
+  CreateDirectoryA(dir, NULL);
+
+  char safeSid[128], safeOwner[128];
+  sanitizeName(sid->valuestring, safeSid, sizeof(safeSid));
+  sanitizeName(owner, safeOwner, sizeof(safeOwner));
+
+  char path[MAX_PATH], tmp[MAX_PATH];
+  snprintf(path, sizeof(path), "%s\\%s__%s.json", dir, safeSid, safeOwner);
+  snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+
+  char *s = cJSON_PrintUnformatted(root);
+  if (!s)
+    return;
+  if (gFeedLockReady)
+    EnterCriticalSection(&gFeedLock);
+  FILE *f = fopen(tmp, "wb");
+  if (f) {
+    fputs(s, f);
+    fclose(f);
+    MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING);
+  }
+  if (gFeedLockReady)
+    LeaveCriticalSection(&gFeedLock);
+  cJSON_free(s);
+
+  bpListNotifyViewedStage(sid->valuestring, owner);
+  bpLog("stage captured: %s owner=%s props=%d",
+        sid->valuestring, owner, cJSON_GetArraySize(props));
 }
 
 static void captureFeedMeta(const char *buf, u32 len) {
@@ -377,11 +551,13 @@ static void feedAccumulate(u64 ssl, const char *buf, u32 len) {
   if (!c)
     return;
 
-  // 只对可能是 feed 响应的数据开始累积
+  // 只对可能是 feed / stage 响应的数据开始累积
   if (c->len == 0 &&
       !memFind(buf, len, "\"feeds\"") &&
       !memFind(buf, len, "\"extra_data\"") &&
-      !memFind(buf, len, "p0id"))
+      !memFind(buf, len, "p0id") &&
+      !memFind(buf, len, "\"stage_id\"") &&
+      !memFind(buf, len, "Content-Type: application/json"))
     return;
 
   if ((u64)c->len + len > BP_FEED_BUF) {
@@ -447,6 +623,7 @@ static void feedAccumulate(u64 ssl, const char *buf, u32 len) {
       obj[objlen] = 0;
       cJSON *root = cJSON_Parse(obj);
       if (root) {
+        captureStageFromJson(root);
         captureFeedFromJson(root);
         cJSON_Delete(root);
       }
@@ -709,7 +886,21 @@ static int detour_SslOut(u64 ssl, void *buf, int num) {
           memFind((const char *)buf, take, "p0id"))
         captureFeedMeta((const char *)buf, take);
 
-      if (bpDumpOk(idx, 300)) {
+      // 写操作（stage set / recording create|update / feed create）不参与限流，
+      // 这些是部署链路唯一可参考的样本
+      // stage set 的请求体和请求头是两次 SSL_write：第二次只有 JSON。
+      // 只要同时出现 stage_id + props 就当作写请求抓下来。
+      int stageBody = memFind((const char *)buf, take, "\"stage_id\"") != NULL &&
+                      memFind((const char *)buf, take, "\"props\"") != NULL;
+      int writeReq = stageBody ||
+          memFind((const char *)buf, take, "/service/stage/api/v1/set") != NULL ||
+          memFind((const char *)buf, take, "/service/stage/api/v1/create") != NULL ||
+          memFind((const char *)buf, take, "/service/stage/api/v1/update") != NULL ||
+          memFind((const char *)buf, take, "/service/recording/api/v2/create") != NULL ||
+          memFind((const char *)buf, take, "/service/recording/api/v2/update") != NULL ||
+          memFind((const char *)buf, take, "/service/social-feed/api/v1/create") != NULL;
+
+      if (writeReq || bpDumpOk(idx, 300)) {
         char path[MAX_PATH];
         snprintf(path, sizeof(path), "%s\\req_%05u.bin", gCtx.capFolder, idx);
         FILE *fp = fopen(path, "wb");

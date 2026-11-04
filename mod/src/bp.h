@@ -88,6 +88,7 @@ void bpListInit(void);
 void bpListRefresh(void);
 void bpListUI(void);
 void bpListNotifyViewed(const char *url);
+void bpListNotifyViewedStage(const char *stageId, const char *owner);
 
 // 探测初始化（扫描、hook）
 void bpProbeInit(void);

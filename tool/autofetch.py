@@ -120,6 +120,22 @@ def write_bytes(path, data):
     os.replace(tmp, path)
 
 
+def recording_id(url: str) -> str:
+    base = os.path.basename(url.split("?")[0])
+    return base.rsplit(".", 1)[0]
+
+
+def load_feed_meta() -> dict:
+    """mod 抓到的 feed 元数据：recording_id -> {pool_type, level_id, pos, ...}"""
+    path = os.path.join(bpdata.data_dir("steam"), "feed_meta.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
 def process(url: str, out_dir: str, force=False):
     real = rewrite(url)
     print("  下载", real)
@@ -134,7 +150,14 @@ def process(url: str, out_dir: str, force=False):
         print("  警告：响应里没有可识别的 block（%d 字节）" % len(data))
         return None
 
-    env = skybp.build_envelope(frames, source=real)
+    # 服务器侧的 pool_type 决定这是留影还是共享空间，比内容猜测可靠
+    feed = load_feed_meta().get(recording_id(real)) or {}
+    pool_type = feed.get("pool_type") or ""
+    extra_meta = {k: feed.get(k) for k in
+                  ("level_id", "pos", "ori", "social_feed_id", "message")}
+    env = skybp.build_envelope(frames, source=real,
+                               pool_type=pool_type or None,
+                               extra_meta=extra_meta)
     stid = (env.get("block") or {}).get("stid") or (env.get("meta") or {}).get("stid")
     if not stid:
         stid = os.path.basename(real.split("?")[0]).rsplit(".", 1)[0] or "recording"
@@ -157,8 +180,9 @@ def process(url: str, out_dir: str, force=False):
     s = env["summary"]
     m = env["meta"]
     print("  蓝图 -> %s" % bp_path)
-    print("    kind=%s  duration=%ss  chunks=%d  notes=%d  placeables=%d"
-          % (env["kind"], m.get("duration"), len(frames), s["notes"], s["placeables"]))
+    print("    kind=%s  pool=%s  duration=%ss  chunks=%d  notes=%d  objects=%d"
+          % (env["kind"], m.get("pool_type", "-"), m.get("duration"),
+             len(frames), s["notes"], s.get("objects", s["placeables"])))
     for w in warnings:
         print("    warn:", w)
     if errors:
@@ -169,6 +193,8 @@ def process(url: str, out_dir: str, force=False):
         "file": os.path.basename(bp_path),
         "ndjson": os.path.basename(nd_path),
         "kind": env["kind"],
+        "pool_type": m.get("pool_type"),
+        "objects": s.get("objects", s.get("placeables")),
         "duration": m.get("duration"),
         "chunks": len(frames),
         "notes": s["notes"],

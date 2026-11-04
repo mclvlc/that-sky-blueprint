@@ -21,6 +21,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bpdata  # noqa: E402
 import deploy  # noqa: E402
+import stage_deploy  # noqa: E402
 
 # mod 现在把队列/session/结果写到数据目录，旧位置仅作迁移期回退
 DATA_DIR = bpdata.data_dir("steam")
@@ -93,6 +94,41 @@ def process_queue(dry_run=False):
         return True
 
     emit("  user=%s level=%s pool=%s" % (user, level, pool_type))
+
+    # 共享空间：新建 SharedSpaceCandle + 写 stage props（整份覆盖）
+    try:
+        env = deploy.skybp.load(blueprint)
+        kind = q.get("kind") or env.get("kind") or ""
+    except Exception:
+        env, kind = {}, ""
+
+    if kind == "shared_space":
+        meta = env.get("meta") or {}
+        payload = stage_deploy.build_payload(env.get("space") or {}, user, session)
+        s_pos = q.get("pos") or meta.get("pos") or ""
+        s_ori = q.get("ori") or meta.get("ori") or "(0,0,0,1)"
+        if not s_pos:
+            res = {"ok": False, "line": "%s  FAIL  shared space: no position" % stamp(),
+                   "error": "no position"}
+            write_result(res)
+            os.remove(queue_path)
+            emit(res["line"])
+            return True
+        emit("  space=%s props=%d pos=%s"
+             % (meta.get("stage_id") or "?", len(payload.get("props") or []), s_pos))
+        rc = stage_deploy.deploy(blueprint, "", dry_run=dry_run, force=True,
+                                 verify=False, create=True,
+                                 pos=s_pos, ori=s_ori, message=message)
+        ok = (rc == 0)
+        line = ("%s  %s  shared_space  stage=%s  props=%d  pos=%s"
+                % (stamp(), "OK" if ok else "FAIL",
+                   meta.get("stage_id") or "?", len(payload.get("props") or []), s_pos))
+        res = {"ok": ok, "kind": "shared_space", "line": line,
+               "stage_id": meta.get("stage_id"), "pos": s_pos}
+        write_result(res)
+        os.remove(queue_path)
+        emit(line)
+        return True
     # Pos 为空时用蓝图自身的位置：角色首帧 > ppsp > 原点
     if not pos:
         try:

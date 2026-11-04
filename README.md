@@ -37,8 +37,10 @@ that-sky-blueprint/
 ├─ tool/                    Python 工具
 │  ├─ skybp.py              .skyblueprint 读写 / 校验 / 列表 / 导出
 │  ├─ autofetch.py          监控 links.txt，下载 ndjson 并合并成蓝图
-│  ├─ deploy.py             把蓝图上传为新的留影 + social feed
-│  ├─ deployd.py            一键部署守护进程（配合游戏内按钮）
+│  ├─ deploy.py             把留影蓝图上传为新的 recording + social feed
+│  ├─ stage_import.py       共享空间 stage 文档 -> 蓝图
+│  ├─ stage_deploy.py       共享空间蓝图 -> stage/api/v1/set（+ 新建空间入口）
+│  ├─ deployd.py            一键部署守护进程（留影 / 共享空间自动分流）
 │  ├─ cn_import.py          国服分块 -> 蓝图
 │  ├─ bpdata.py             数据目录解析
 │  └─ reqdump.py            解析抓到的请求（排障用）
@@ -55,6 +57,12 @@ that-sky-blueprint/
 - **游戏内列表**：F2 面板里列出所有蓝图，支持备注、最近查看、打开目录、修改部署参数。
 - **复制留影**：通过服务器 API 重新创建 recording 和 social feed，会带上原留影里的
   其他玩家 ID（多人留影可保留多人）。
+- **保存共享空间**：共享空间的内容是 `stage/api/v1/get` 下发的 stage 文档
+  （物件名 + 局部坐标 + 四元数朝向 + 缩放），mod 自动抓取并转成 `kind=shared_space`
+  的蓝图，`space` 字段保留原始文档，`block.plyr[0].plac` 是合成的物件列表。
+- **部署共享空间**：`stage_deploy.py` 调 `stage/api/v1/set` 写回物件，
+  再用 `social-feed/api/v1/create` 新建空间入口（`SharedSpaceCandle`）。
+  注意这是**整份覆盖**，不是追加。
 - **国服只读抓取**：国服客户端可以抓取录制分块并转成蓝图（部署未完成）。
 
 ## 环境要求
@@ -147,7 +155,39 @@ python tool/deploy.py samples/xxx.skyblueprint \
     --message "Blueprint"
 ```
 
-### 6. 手动查看 / 校验
+### 6. 共享空间（保存 / 部署）
+
+打开一个共享空间后，mod 会抓取 `stage/api/v1/get` 的响应并写到：
+
+```text
+%APPDATA%\sky-blueprint\steam\stages\<stage_id>__<owner>.json
+```
+
+转换器（持续运行）会把它变成 `space_<stage_id>_<owner8>.skyblueprint`：
+
+```bash
+python tool/stage_import.py            # 持续监控
+python tool/stage_import.py --once     # 处理一次
+```
+
+部署（只能写自己的空间）：
+
+```bash
+# 写入 props，并新建一个空间入口（需要世界坐标）
+python tool/stage_deploy.py space_xxx.skyblueprint \
+    --create --pos "(-88.625,64.443,-761.447)" --ori "(0,-0.421,-0,0.907)" \
+    --message "测试空间" --verify
+
+# 只写 props（不新建入口）
+python tool/stage_deploy.py space_xxx.skyblueprint
+
+# 复制别人的空间到自己的空间（整份覆盖）
+python tool/stage_deploy.py other_space.skyblueprint --force --verify
+```
+
+游戏内也可以：选中 `shared_space` 蓝图 → Deploy，面板会自动带上源空间的世界坐标。
+
+### 7. 手动查看 / 校验
 
 ```bash
 python tool/skybp.py list  %APPDATA%\sky-blueprint\steam\blueprints
@@ -166,6 +206,8 @@ mod 不会往安装目录写运行文件，全部落在：
     bp.log  links.txt  session.json  feed_meta.json
     deploy_queue.json  deploy_result.txt  deploy_result.json
     blueprints\   蓝图（.skyblueprint / index.json）
+    stages\       共享空间的原始 stage 文档
+    space_pos.json  作者 -> 空间世界坐标（部署新空间用）
     captures\     调试抓包（有数量上限）
     records\      国服录制原始分块
 ```
@@ -174,12 +216,16 @@ mod 不会往安装目录写运行文件，全部落在：
 
 ## 已知限制
 
-- **只支持留影**：留言、共享空间请勿期待。
+- **留言未打通**：留影和共享空间可用，留言（Message）还没验证。
 - **版本绑定**：hook 地址按 0.35.2 定位，游戏更新会失效。
 - **多人留影依赖源元数据**：需要先抓到源留影的 `p0id/p1id/...`（mod 会自动从 feed 响应里提取），否则复制出来只有一个人。
-- **位置是地图坐标**：部署时的 `pos` 是蓝图里的世界坐标，不同地图不能直接套用。
+- **位置是地图坐标**：留影部署的 `pos` 是蓝图里的世界坐标，不同地图不能直接套用。
+- **共享空间是整份覆盖**：`stage/api/v1/set` 会替换该 stage 上的全部物件，不能追加；部署前先保存现有空间。
+- **只能写自己的空间**：stage 按 `stage_id + user_id` 存。复制别人的空间要加 `--force`，且会写进你自己的空间。
+- **stage 坐标是局部的**：物件坐标相对 stage 原点，只能写回同名 `stage_id`（同一张地图的同一位置）；新建入口的位置由 `--pos` 决定。
+- **新建入口可能受限**：`social-feed/api/v1/create` 带 `do_payment:true`，服务器可能限制每日次数或消耗货币。
 - **国服部署未完成**：国服只做了抓取，创建/发布流程尚未打通。
-- **抓包会上限**：调试抓包默认限流，不是完整流量记录。
+- **抓包会上限**：调试抓包默认限流（写请求除外），不是完整流量记录。
 
 ## 风险与免责声明
 
@@ -192,9 +238,11 @@ mod 不会往安装目录写运行文件，全部落在：
 3. **数据与隐私**：mod 会在本地记录 session token、user id 和请求内容
    （默认写在 `%APPDATA%` 下）。不要把 `session.json`、`links.txt`、`captures\`
    分享给他人，也不要提交到仓库。
-4. **稳定性**：mod 通过 inline hook 修改游戏函数，可能崩溃、丢失未保存内容，
+4. **覆盖风险**：部署共享空间会整份覆盖你当前的物件列表；部署留影会在世界里
+   多出一个留影。操作前请先用工具保存现有蓝图，便于回滚。
+5. **稳定性**：mod 通过 inline hook 修改游戏函数，可能崩溃、丢失未保存内容，
    或与其他 mod 冲突。
-5. **无担保**：本项目按 GPL-3.0 “原样”提供，不提供任何明示或暗示的担保；
+6. **无担保**：本项目按 GPL-3.0 “原样”提供，不提供任何明示或暗示的担保；
    使用造成的一切后果由使用者自行承担。
 
 ## 相关项目

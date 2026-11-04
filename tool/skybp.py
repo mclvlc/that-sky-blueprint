@@ -34,9 +34,10 @@
 
 用法:
     python skybp.py show     <file.skyblueprint>
+    python skybp.py space    <file.skyblueprint> [--json]      # 共享空间物件列表
     python skybp.py validate <file.skyblueprint> [--quiet]
     python skybp.py list     <dir> [--json]
-    python skybp.py pack     <input.ndjson|block.json> <out.skyblueprint> [--kind K] [--source URL]
+    python skybp.py pack     <input.ndjson|block.json> <out.skyblueprint> [--kind K] [--source URL] [--pool TYPE]
     python skybp.py unpack   <file.skyblueprint> <out.json>
     python skybp.py export   <file.skyblueprint> <out> --as block|chunks|ndjson|notes|csv
     python skybp.py align    <源.skyblueprint> <目标参考.skyblueprint> [输出] [--plac]
@@ -348,8 +349,25 @@ def merge_frames(frames):
     return template
 
 
-def detect_kind(block) -> str:
-    """粗略判断 blueprint 类型。"""
+def kind_from_pool(pool_type):
+    """服务器侧的 pool_type -> 蓝图类型（比内容启发式可靠）。"""
+    p = (pool_type or "").strip().lower()
+    if not p:
+        return None
+    if p.startswith("sharedspace") or p.startswith("shared_space"):
+        return "shared_space"
+    if p.startswith("recording"):
+        return "recording"
+    if p.startswith("message"):
+        return "message"
+    return None
+
+
+def detect_kind(block, pool_type=None) -> str:
+    """判断 blueprint 类型：优先用服务器给出的 pool_type，其次看内容。"""
+    hinted = kind_from_pool(pool_type)
+    if hinted:
+        return hinted
     if not isinstance(block, dict):
         return "unknown"
     ghost = content_player(block) or {}
@@ -367,12 +385,44 @@ def detect_kind(block) -> str:
     return "unknown"
 
 
+def space_objects(block):
+    """提取共享空间里的物件（跨玩家、跨分块去重）。
+
+    返回 [{"def_id", "name", "pos", "right", "up", "forward", "scale", "scale_vec"}]
+    """
+    players = block.get("plyr") if isinstance(block, dict) else None
+    if not isinstance(players, list):
+        return []
+    out = []
+    seen = set()
+    for p in players:
+        if not isinstance(p, dict):
+            continue
+        for e in _event_list(p.get("plac")):
+            if not is_placeable(e):
+                continue
+            sig = json.dumps([e[0], e[2], e[3], e[4:]], ensure_ascii=False, sort_keys=True)
+            if sig in seen:
+                continue
+            seen.add(sig)
+            obj = {"def_id": e[0], "name": e[2], "pos": e[3]}
+            if len(e) >= 7:
+                obj["right"], obj["up"], obj["forward"] = e[4], e[5], e[6]
+            if len(e) >= 8:
+                obj["scale"] = e[7]
+            if len(e) >= 10:
+                obj["scale_vec"] = e[9]
+            out.append(obj)
+    return out
+
+
 def summarize(block, chunks=None) -> dict:
     """从合并后的 block 计算摘要（列表/校验都靠它）。"""
     summary = {
         "notes": 0, "events": 0, "anims": 0,
         "placeables": 0, "players": 0, "trajectory": 0,
         "strs": 0, "key_min": None, "key_max": None,
+        "objects": 0,
     }
     if not isinstance(block, dict):
         return summary
@@ -400,6 +450,7 @@ def summarize(block, chunks=None) -> dict:
     if keys:
         summary["key_min"] = min(keys)
         summary["key_max"] = max(keys)
+    summary["objects"] = len(space_objects(block))
     if chunks is not None:
         summary["chunks"] = len(chunks)
     return summary
@@ -504,8 +555,13 @@ def align_blueprint(src, ref, out_path, anchor="first"):
 # ---------------------------------------------------------------------------
 # envelope 构建 / 读写
 # ---------------------------------------------------------------------------
-def build_envelope(frames, kind=None, source=None, created=None, require_block=True):
-    """由一组分块（或单个 block）构建 v2 envelope。"""
+def build_envelope(frames, kind=None, source=None, created=None, require_block=True,
+                   pool_type=None, extra_meta=None):
+    """由一组分块（或单个 block）构建 v2 envelope。
+
+    pool_type 来自服务器 feed（RecordingCandle / SharedSpaceShrine / ...），
+    有值时用它决定 kind，而不是靠内容猜测。
+    """
     frames = [f for f in frames if isinstance(f, dict)]
     if not frames:
         raise ValueError("没有 block 数据")
@@ -516,7 +572,7 @@ def build_envelope(frames, kind=None, source=None, created=None, require_block=T
     stid = stids[-1] if stids else ""
 
     block = merge_frames(frames) if len(frames) > 1 else copy.deepcopy(frames[0])
-    k = kind or detect_kind(block)
+    k = kind or detect_kind(block, pool_type)
 
     duration = _num(block.get("chet"), 0.0)
     chets = [_num(f.get("chet"), 0.0) for f in frames if "chet" in f]
@@ -536,6 +592,13 @@ def build_envelope(frames, kind=None, source=None, created=None, require_block=T
         "chunk_span": chunk_span,
         "derived_block": len(frames) > 1,
     }
+    if pool_type:
+        meta["pool_type"] = pool_type
+    if isinstance(extra_meta, dict):
+        for key, value in extra_meta.items():
+            if value in (None, "", [], {}):
+                continue
+            meta.setdefault(key, value)
     env = {
         "format": FORMAT_V2,
         "kind": k,
@@ -642,8 +705,10 @@ def validate(env) -> tuple:
         warnings.append("stid 不是标准 UUID: %r" % (block["stid"],))
 
     stfs = block.get("stfs")
+    stage_space = bool(env.get("space")) and env.get("kind") == "shared_space"
     if not isinstance(stfs, list) or not stfs:
-        warnings.append("block 缺少 stfs 字段表")
+        if not stage_space:      # stage 文档转出来的空间本来就没有状态字段表
+            warnings.append("block 缺少 stfs 字段表")
     elif not all(isinstance(x, str) for x in stfs):
         errors.append("stfs 必须是字符串数组")
 
@@ -742,7 +807,10 @@ def describe(env) -> str:
     s = env.get("summary") or {}
     m = env.get("meta") or {}
     lines = []
-    lines.append("format   : %s   kind=%s" % (env.get("format"), env.get("kind")))
+    pool = m.get("pool_type")
+    lines.append("format   : %s   kind=%s%s"
+                 % (env.get("format"), env.get("kind"),
+                    ("   pool=%s" % pool) if pool else ""))
     lines.append("stid     : %s" % (block.get("stid") or m.get("stid") or "-"))
     lines.append("source   : %s" % (env.get("source") or "-"))
     lines.append("created  : %s" % (env.get("created") or "-"))
@@ -760,14 +828,15 @@ def describe(env) -> str:
     if strs:
         lines.append("strs(%d)  : %s" % (len(strs), ", ".join(map(str, strs[:12]))))
 
-    plac = []
-    for p in block.get("plyr") or []:
-        if isinstance(p, dict):
-            plac.extend(e for e in (p.get("plac") or []) if is_placeable(e))
-    if plac:
-        lines.append("placeables:")
-        for e in plac[:8]:
-            lines.append("    %s @ %s" % (e[2], e[3]))
+    objs = space_objects(block)
+    if objs:
+        names = {}
+        for o in objs:
+            names[o["name"]] = names.get(o["name"], 0) + 1
+        kinds = ", ".join("%s×%d" % (n, c) for n, c in sorted(names.items())[:8])
+        lines.append("objects  : %d  (%s)" % (len(objs), kinds))
+        for o in objs[:8]:
+            lines.append("    %s @ %s" % (o["name"], o["pos"]))
 
     for i, p in enumerate((block.get("plyr") or [])[:3]):
         if not isinstance(p, dict):
@@ -1041,6 +1110,20 @@ def main():
         print(describe(load(args[1])))
         return 0
 
+    if cmd == "space":
+        if len(args) < 2:
+            return usage() or 3
+        env = load(args[1])
+        objs = space_objects(env.get("block") or {})
+        if "--json" in args:
+            print(json.dumps(objs, ensure_ascii=False, indent=1))
+        else:
+            print("%s  kind=%s  objects=%d"
+                  % (os.path.basename(args[1]), env.get("kind"), len(objs)))
+            for i, o in enumerate(objs):
+                print("[%3d] %-34s %s" % (i, o.get("name"), o.get("pos")))
+        return 0
+
     if cmd == "validate":
         if len(args) < 2:
             return usage() or 3
@@ -1075,6 +1158,7 @@ def main():
             frames,
             kind=arg_value(args, "--kind"),
             source=arg_value(args, "--source", src),
+            pool_type=arg_value(args, "--pool"),
         )
         pack(env, dst)
         print("packed -> %s  (%d chunks, %d notes)" % (dst, len(frames), env["summary"]["notes"]))

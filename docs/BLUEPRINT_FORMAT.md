@@ -67,7 +67,38 @@ SKYBP2\n
 - `summary` 与 `block` 的统计一致
 - `integrity` 里的两个 SHA-256 与实际内容一致
 
-## 3. 部署时的注意事项
+## 3. 共享空间：stage 文档
+
+共享空间的内容不在留影 ndjson 里，而是服务器下发的 stage 文档：
+
+```
+POST /service/stage/api/v1/get
+{"stage_id":"DuskStart_CNDL","level_id":"DuskStart","user_id":"<owner>","updated_at":""}
+
+200 application/json
+{"status":"OK","stage_id":"DuskStart_CNDL","level_id":"DuskStart",
+ "user_id":"<owner>","sequence":1,"version":0,"updated_at":"...",
+ "props":[{"version":0,"type":"unlock","name":"CharSkyKid_Prop_Pillow",
+           "uniqueID":6,"pos":"(-0.37,-0.016,-1.781)",
+           "ori":"(0.019,0.981,-0.013,0.195)","scale":"(1,1,1)",
+           "userDataBool":false,"dye":""}]}
+```
+
+- `stage_id` 形如 `<地图>_CNDL`，一个玩家在每张图只有一个空间。
+- 物件坐标是 **stage 局部坐标**，不是世界坐标。
+- 写回用 `POST /service/stage/api/v1/set`，`props` 原样回传即可；
+  这是**整份覆盖**，不是追加。
+- 空间在世界里的入口是 `social-feed/api/v1/create` 的 `SharedSpaceCandle`
+  （`extra_data.pos` 决定位置）。
+
+对应到蓝图：
+
+- `kind = "shared_space"`
+- `space` = 原始 stage 文档
+- `block.plyr[0].plac` = 合成的物件列表（defId=0，坐标为 stage 局部坐标）
+- `meta.stage_id / owner_id / sequence / version / pos / ori`
+
+## 4. 部署时的注意事项
 
 - `stid` 默认会被换成新的 UUID，否则服务器可能认为是同一条留影。
 - 多人留影需要 `extra_data` 里带上 `p0id`、`p1id`……（来自源 feed 的响应），

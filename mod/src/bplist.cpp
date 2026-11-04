@@ -26,6 +26,7 @@ typedef struct {
   char path[MAX_PATH];
   char stid[80];
   char kind[24];
+  char viewKey[192];    // 最近查看的匹配键：留影用 recording id，共享空间用 stage:ID:owner
   char created[40];
   char note[192];
   char timeStr[32];
@@ -46,11 +47,15 @@ typedef struct {
   char placPos[64];
   char firstPos[64];
   char ppsp[64];
+  char feedPos[64];     // 共享空间源 feed 的世界坐标（部署新空间时用）
+  char feedOri[64];
   int placCount;
 } BpListItem;
 
 static BpListItem gItems[BP_LIST_MAX];
 static int gItemCount = 0;
+static FILETIME gDirStamp;
+static int gDirStampInit = 0;
 static char gDir[MAX_PATH] = {0};
 static char gDirEdit[MAX_PATH] = {0};
 static char gFilter[128] = {0};
@@ -286,6 +291,17 @@ static void parseBlueprint(BpListItem *it) {
     snprintf(it->kind, sizeof(it->kind), "%s", jstr(root, "kind"));
     snprintf(it->created, sizeof(it->created), "%s", jstr(root, "created"));
     snprintf(it->source, sizeof(it->source), "%s", jstr(root, "source"));
+
+    // 共享空间没有 recording id，用 stage_id + owner 作为“最近查看”的键
+    snprintf(it->feedPos, sizeof(it->feedPos), "%s", jstr(meta, "pos"));
+    snprintf(it->feedOri, sizeof(it->feedOri), "%s", jstr(meta, "ori"));
+
+    const char *stageId = jstr(meta, "stage_id");
+    const char *ownerId = jstr(meta, "owner_id");
+    if (stageId[0] && ownerId[0])
+      snprintf(it->viewKey, sizeof(it->viewKey), "stage:%s:%s", stageId, ownerId);
+    else
+      urlBase(it->source, it->viewKey, sizeof(it->viewKey));
   } else {
     // v1 / 裸 block：自己统计
     it->notes = countNotes(ghost);
@@ -402,13 +418,20 @@ static void viewedPath(char *out, size_t n) {
   snprintf(out, n, "%s\\viewed.json", gDir);
 }
 
-static void loadViewed(void) {
-  for (int i = 0; i < gItemCount; i++)
-    gItems[i].viewTime = 0;
-  if (!gDir[0]) return;
+static void stageViewsPath(char *out, size_t n) {
+  if (gCtx.dataFolder[0])
+    snprintf(out, n, "%s\\stage_views.json", gCtx.dataFolder);
+  else
+    out[0] = 0;
+}
 
+// 共享空间的“最近查看”：stage:<stage_id>:<owner> -> unix 时间
+// 单独存一份，因为 stage 文档被抓取时蓝图文件可能还没生成。
+static void applyStageViews(void) {
   char path[MAX_PATH];
-  viewedPath(path, sizeof(path));
+  stageViewsPath(path, sizeof(path));
+  if (!path[0]) return;
+
   size_t len = 0;
   char *data = readWholeFile(path, &len);
   if (!data) return;
@@ -421,14 +444,43 @@ static void loadViewed(void) {
   }
 
   for (int i = 0; i < gItemCount; i++) {
-    cJSON *v = cJSON_GetObjectItemCaseSensitive(root, noteKey(&gItems[i]));
-    if (cJSON_IsNumber(v) && v->valuedouble > 0) {
+    if (!gItems[i].viewKey[0]) continue;
+    cJSON *v = cJSON_GetObjectItemCaseSensitive(root, gItems[i].viewKey);
+    if (cJSON_IsNumber(v) && (long long)v->valuedouble > gItems[i].viewTime)
       gItems[i].viewTime = (long long)v->valuedouble;
-      formatUnixTime(gItems[i].viewTime, gItems[i].timeStr,
-                     sizeof(gItems[i].timeStr));
-    }
   }
   cJSON_Delete(root);
+}
+
+static void loadViewed(void) {
+  for (int i = 0; i < gItemCount; i++)
+    gItems[i].viewTime = 0;
+  if (!gDir[0]) return;
+
+  char path[MAX_PATH];
+  viewedPath(path, sizeof(path));
+  size_t len = 0;
+  char *data = readWholeFile(path, &len);
+  if (data) {
+    cJSON *root = cJSON_Parse(data);
+    free(data);
+    if (cJSON_IsObject(root)) {
+      for (int i = 0; i < gItemCount; i++) {
+        cJSON *v = cJSON_GetObjectItemCaseSensitive(root, noteKey(&gItems[i]));
+        if (cJSON_IsNumber(v) && v->valuedouble > 0)
+          gItems[i].viewTime = (long long)v->valuedouble;
+      }
+    }
+    if (root) cJSON_Delete(root);
+  }
+
+  applyStageViews();
+
+  for (int i = 0; i < gItemCount; i++) {
+    if (gItems[i].viewTime > 0)
+      formatUnixTime(gItems[i].viewTime, gItems[i].timeStr,
+                     sizeof(gItems[i].timeStr));
+  }
 }
 
 static void saveViewed(void) {
@@ -470,7 +522,8 @@ static void markViewed(const char *url) {
   for (int i = 0; i < gItemCount; i++) {
     char sb[128];
     urlBase(gItems[i].source, sb, sizeof(sb));
-    if (strcmp(sb, base) == 0 || strcmp(gItems[i].stid, base) == 0) {
+    if (strcmp(sb, base) == 0 || strcmp(gItems[i].stid, base) == 0 ||
+        (gItems[i].viewKey[0] && strcmp(gItems[i].viewKey, base) == 0)) {
       gItems[i].viewTime = now;
       formatUnixTime(now, gItems[i].timeStr, sizeof(gItems[i].timeStr));
       marked++;
@@ -494,11 +547,61 @@ static void markViewed(const char *url) {
   bpLog("viewed: %s", base);
 }
 
+// 共享空间：把 stage 文档的查看时间写进 <data>/stage_views.json。
+// 从网络线程调用，用自旋锁避免多个 SSL 线程同时改文件。
+static volatile LONG gStageViewBusy = 0;
+
+static void recordStageView(const char *key, long long ts) {
+  char path[MAX_PATH];
+  stageViewsPath(path, sizeof(path));
+  if (!path[0]) return;
+
+  while (InterlockedCompareExchange(&gStageViewBusy, 1, 0) != 0) Sleep(1);
+
+  cJSON *root = NULL;
+  size_t len = 0;
+  char *data = readWholeFile(path, &len);
+  if (data) {
+    root = cJSON_Parse(data);
+    free(data);
+  }
+  if (!cJSON_IsObject(root)) {
+    if (root) cJSON_Delete(root);
+    root = cJSON_CreateObject();
+  }
+
+  cJSON_DeleteItemFromObjectCaseSensitive(root, key);
+  cJSON_AddNumberToObject(root, key, (double)ts);
+
+  if (cJSON_GetArraySize(root) <= 500) {
+    char *s = cJSON_PrintUnformatted(root);
+    char tmp[MAX_PATH];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE *f = fopen(tmp, "wb");
+    if (f) {
+      if (s) fputs(s, f);
+      fclose(f);
+      MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING);
+    }
+    if (s) cJSON_free(s);
+  }
+  cJSON_Delete(root);
+  InterlockedExchange(&gStageViewBusy, 0);
+}
+
 // 网络线程 -> UI 线程的待处理查看事件
 static CRITICAL_SECTION gViewLock;
 static int gViewLockInit = 0;
 static char gPendingView[512];
 static volatile LONG gViewSeq = 0;
+
+void bpListNotifyViewedStage(const char *stageId, const char *owner) {
+  if (!stageId || !stageId[0] || !owner || !owner[0]) return;
+  char key[192];
+  snprintf(key, sizeof(key), "stage:%s:%s", stageId, owner);
+  recordStageView(key, (long long)time(NULL));
+  bpListNotifyViewed(key);
+}
 
 void bpListNotifyViewed(const char *url) {
   if (!gViewLockInit || !url || !url[0]) return;
@@ -564,6 +667,17 @@ void bpListRefresh(void) {
 
   if (gItemCount > 1)
     qsort(gItems, (size_t)gItemCount, sizeof(BpListItem), cmpItems);
+
+  // 记录目录时间戳，供自动刷新判断
+  {
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    if (gDir[0] && GetFileAttributesExA(gDir, GetFileExInfoStandard, &fad)) {
+      gDirStamp = fad.ftLastWriteTime;
+      gDirStampInit = 1;
+    } else {
+      gDirStampInit = 0;
+    }
+  }
 
   snprintf(gStatus, sizeof(gStatus), "%d blueprints  |  %s", gItemCount, gDir);
   bpLog("blueprint list: %d files in %s", gItemCount, gDir);
@@ -666,15 +780,16 @@ static void jsonEscape(const char *in, char *out, size_t n) {
   out[j] = 0;
 }
 
-static void queueDeploy(const char *blueprint) {
+static void queueDeploy(const char *blueprint, const char *kind) {
   if (!gCtx.dataFolder[0]) return;
-  char p[896], m[256], pos[128], ori[128], lvl[192], pool[96];
+  char p[896], m[256], pos[128], ori[128], lvl[192], pool[96], k[32];
   jsonEscape(blueprint, p, sizeof(p));
   jsonEscape(gDeployMsg, m, sizeof(m));
   jsonEscape(gDeployPos, pos, sizeof(pos));
   jsonEscape(gDeployOri, ori, sizeof(ori));
   jsonEscape(gDeployLevel, lvl, sizeof(lvl));
   jsonEscape(gDeployPool, pool, sizeof(pool));
+  jsonEscape(kind ? kind : "", k, sizeof(k));
 
   char tmp[MAX_PATH], dst[MAX_PATH];
   snprintf(tmp, sizeof(tmp), "%s\\deploy_queue.json.tmp", gCtx.dataFolder);
@@ -686,8 +801,8 @@ static void queueDeploy(const char *blueprint) {
   }
   fprintf(f,
     "{\"blueprint\":\"%s\",\"message\":\"%s\",\"pos\":\"%s\",\"ori\":\"%s\","
-    "\"level\":\"%s\",\"pool_type\":\"%s\"}\n",
-    p, m, pos, ori, lvl, pool);
+    "\"level\":\"%s\",\"pool_type\":\"%s\",\"kind\":\"%s\"}\n",
+    p, m, pos, ori, lvl, pool, k);
   fclose(f);
   MoveFileExA(tmp, dst, MOVEFILE_REPLACE_EXISTING);
   snprintf(gDeployStatus, sizeof(gDeployStatus),
@@ -759,6 +874,26 @@ static void sessionInfo(char *out, size_t n) {
 void bpListUI(void) {
   bpListInit();
   bpListPollViewed();
+
+  // 每 2 秒检查一次目录：autofetch / stage_import 会在后台写入新蓝图
+  {
+    static u32 lastCheck = 0;
+    u32 now = GetTickCount();
+    if (now - lastCheck > 2000) {
+      lastCheck = now;
+      WIN32_FILE_ATTRIBUTE_DATA fad;
+      if (gDir[0] && GetFileAttributesExA(gDir, GetFileExInfoStandard, &fad)) {
+        if (!gDirStampInit) {
+          gDirStamp = fad.ftLastWriteTime;
+          gDirStampInit = 1;
+        } else if (!ImGui::IsAnyItemActive() &&
+                   CompareFileTime(&fad.ftLastWriteTime, &gDirStamp) != 0) {
+          gDirStamp = fad.ftLastWriteTime;
+          bpListRefresh();
+        }
+      }
+    }
+  }
 
   // 每 2 秒刷新一次部署结果 / session 状态
   {
@@ -909,18 +1044,23 @@ void bpListUI(void) {
         gDeploySel = gSelected;
         snprintf(gNoteEdit, sizeof(gNoteEdit), "%s", it->note);
         const char *raw = NULL;
-        if (it->placPos[0])
+        if (strcmp(it->kind, "shared_space") == 0 && it->feedPos[0]) {
+          raw = it->feedPos;
+          if (it->feedOri[0])
+            snprintf(gDeployOri, sizeof(gDeployOri), "%s", it->feedOri);
+        } else if (it->placPos[0]) {
           raw = it->placPos;
-        else if (it->firstPos[0])
+        } else if (it->firstPos[0]) {
           raw = it->firstPos;
-        else if (it->ppsp[0] && strncmp(it->ppsp, "(0,", 3) != 0)
+        } else if (it->ppsp[0] && strncmp(it->ppsp, "(0,", 3) != 0) {
           raw = it->ppsp;
+        }
         if (raw)
           setDeployPos(raw);
       }
 
       ImGui::Separator();
-      ImGui::TextDisabled("Deploy (deployd.py uploads to private server, creates a new recording)");
+      ImGui::TextDisabled("Deploy (recording: new recording; shared_space: new space + props)");
       ImGui::SetNextItemWidth(240);
       ImGui::InputText("Message", gDeployMsg, sizeof(gDeployMsg));
       ImGui::SetNextItemWidth(240);
@@ -934,7 +1074,7 @@ void bpListUI(void) {
       if (ImGui::InputText("Pool", gDeployPool, sizeof(gDeployPool)))
         gDeployEdited = 1;
       if (ImGui::Button("Deploy"))
-        queueDeploy(it->path);
+        queueDeploy(it->path, it->kind);
       ImGui::SameLine();
       if (ImGui::Button("Refresh status")) {
         loadDeployStatus();
