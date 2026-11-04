@@ -90,3 +90,39 @@ jobs:
         with:
           files: ${{ env.ASSET_NAME }}
           generate_release_notes: true
+          body: |
+            ## 安装
+
+            1. 下载下方的 `sky-blueprint-*.zip`，解压出 `sky-blueprint` 文件夹
+            2. 放到 `<游戏目录>/htmodloader/mods/sky-blueprint/`
+               （需要 HTModLoader 1.8.1+）
+            3. 启动游戏，按 **F2** 打开面板
+
+            zip 内容：`sky-blueprint.dll`、`manifest.json`、`README.md`
+
+            ## 部署（可选）
+
+            游戏内 Deploy / 面板一键部署需要 Python 工具：
+
+            ```bash
+            python tool/deployd.py            # 保持运行，面板点 Deploy 即生效
+            ```
+
+            （Python 工具只用标准库，无需安装依赖。）
+
+            抓取留影/共享空间/留言时同时运行：
+
+            ```bash
+            python tool/autofetch.py       # 留影
+            python tool/stage_import.py    # 共享空间
+            python tool/message_import.py  # 留言
+            ```
+
+            数据目录在 `%APPDATA%\sky-blueprint\steam\`（国服是 `cn`）。
+
+            ## 说明
+
+            - 仅支持留影、共享空间、留言；共享空间部署是**整份覆盖**
+            - 服务器地址自动识别（国际服读 `data/AppInfo.tgc`，国服用抓包 Host）
+            - 本项目由 AI 生成，仅供本机/私有服务器研究；使用风险自负
+            - 详细用法见仓库 README
