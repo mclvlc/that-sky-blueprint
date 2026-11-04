@@ -69,7 +69,8 @@ jobs:
         shell: msys2 {0}
         run: |
           set -euo pipefail
-          name="${ASSET_NAME%.zip}"
+          # zip 里的目录名固定为 sky-blueprint，解压后可以直接放进 mods/
+          name="sky-blueprint"
           rm -rf "$name" "$ASSET_NAME"
           mkdir -p "$name"
           cp mod/dist/sky-blueprint.dll "$name/"
