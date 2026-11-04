@@ -70,6 +70,12 @@ def resolve_host(host):
     if h:
         return h
     try:
+        h = load_session().get("host") or ""
+        if h:
+            return h
+    except Exception:
+        pass
+    try:
         with open(CONFIG, encoding="utf-8") as f:
             h = json.load(f).get("host")
         if h:

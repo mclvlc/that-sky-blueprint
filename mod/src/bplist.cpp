@@ -56,6 +56,8 @@ static BpListItem gItems[BP_LIST_MAX];
 static int gItemCount = 0;
 static FILETIME gDirStamp;
 static int gDirStampInit = 0;
+static FILETIME gMsgStamp;      // message_views.json 的时间戳
+static int gMsgStampInit = 0;
 static char gDir[MAX_PATH] = {0};
 static char gDirEdit[MAX_PATH] = {0};
 static char gFilter[128] = {0};
@@ -298,10 +300,22 @@ static void parseBlueprint(BpListItem *it) {
 
     const char *stageId = jstr(meta, "stage_id");
     const char *ownerId = jstr(meta, "owner_id");
-    if (stageId[0] && ownerId[0])
+    const char *feedId = jstr(meta, "social_feed_id");
+    if (strcmp(it->kind, "message") == 0 && feedId[0]) {
+      // 留言按 social_feed_id 的 UUID 前缀记“看过”
+      char base[64];
+      size_t k = 0;
+      while (feedId[k] && feedId[k] != ':' && k + 1 < sizeof(base)) {
+        base[k] = feedId[k];
+        k++;
+      }
+      base[k] = 0;
+      snprintf(it->viewKey, sizeof(it->viewKey), "msg:%s", base);
+    } else if (stageId[0] && ownerId[0]) {
       snprintf(it->viewKey, sizeof(it->viewKey), "stage:%s:%s", stageId, ownerId);
-    else
+    } else {
       urlBase(it->source, it->viewKey, sizeof(it->viewKey));
+    }
   } else {
     // v1 / 裸 block：自己统计
     it->notes = countNotes(ghost);
@@ -452,6 +466,29 @@ static void applyStageViews(void) {
   cJSON_Delete(root);
 }
 
+// 留言的“最近查看”：<data>/message_views.json（social_feed_id 的 UUID -> 时间）
+static void applyMessageViews(void) {
+  if (!gCtx.dataFolder[0]) return;
+  char path[MAX_PATH];
+  snprintf(path, sizeof(path), "%s\\message_views.json", gCtx.dataFolder);
+  size_t len = 0;
+  char *data = readWholeFile(path, &len);
+  if (!data) return;
+  cJSON *root = cJSON_Parse(data);
+  free(data);
+  if (!cJSON_IsObject(root)) {
+    if (root) cJSON_Delete(root);
+    return;
+  }
+  for (int i = 0; i < gItemCount; i++) {
+    if (strncmp(gItems[i].viewKey, "msg:", 4) != 0) continue;
+    cJSON *v = cJSON_GetObjectItemCaseSensitive(root, gItems[i].viewKey + 4);
+    if (cJSON_IsNumber(v) && (long long)v->valuedouble > gItems[i].viewTime)
+      gItems[i].viewTime = (long long)v->valuedouble;
+  }
+  cJSON_Delete(root);
+}
+
 static void loadViewed(void) {
   for (int i = 0; i < gItemCount; i++)
     gItems[i].viewTime = 0;
@@ -475,6 +512,7 @@ static void loadViewed(void) {
   }
 
   applyStageViews();
+  applyMessageViews();
 
   for (int i = 0; i < gItemCount; i++) {
     if (gItems[i].viewTime > 0)
@@ -892,6 +930,23 @@ void bpListUI(void) {
           bpListRefresh();
         }
       }
+
+      // 留言的“看过”记录变化时也要重排（文件本身没变）
+      if (gCtx.dataFolder[0]) {
+        char mpath[MAX_PATH];
+        snprintf(mpath, sizeof(mpath), "%s\\message_views.json", gCtx.dataFolder);
+        WIN32_FILE_ATTRIBUTE_DATA mfad;
+        if (GetFileAttributesExA(mpath, GetFileExInfoStandard, &mfad)) {
+          if (!gMsgStampInit) {
+            gMsgStamp = mfad.ftLastWriteTime;
+            gMsgStampInit = 1;
+          } else if (!ImGui::IsAnyItemActive() &&
+                     CompareFileTime(&mfad.ftLastWriteTime, &gMsgStamp) != 0) {
+            gMsgStamp = mfad.ftLastWriteTime;
+            bpListRefresh();
+          }
+        }
+      }
     }
   }
 
@@ -1044,7 +1099,8 @@ void bpListUI(void) {
         gDeploySel = gSelected;
         snprintf(gNoteEdit, sizeof(gNoteEdit), "%s", it->note);
         const char *raw = NULL;
-        if (strcmp(it->kind, "shared_space") == 0 && it->feedPos[0]) {
+        if ((strcmp(it->kind, "shared_space") == 0 ||
+             strcmp(it->kind, "message") == 0) && it->feedPos[0]) {
           raw = it->feedPos;
           if (it->feedOri[0])
             snprintf(gDeployOri, sizeof(gDeployOri), "%s", it->feedOri);

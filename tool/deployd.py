@@ -21,6 +21,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bpdata  # noqa: E402
 import deploy  # noqa: E402
+import message_deploy  # noqa: E402
 import stage_deploy  # noqa: E402
 
 # mod 现在把队列/session/结果写到数据目录，旧位置仅作迁移期回退
@@ -101,12 +102,41 @@ def process_queue(dry_run=False):
 
     emit("  user=%s level=%s pool=%s" % (user, level, pool_type))
 
-    # 共享空间：新建 SharedSpaceCandle + 写 stage props（整份覆盖）
+    # 类型以蓝图内容为准：space 段=共享空间，message 段=留言，其余=留影
     try:
         env = deploy.skybp.load(blueprint)
-        kind = q.get("kind") or env.get("kind") or ""
     except Exception:
-        env, kind = {}, ""
+        env = {}
+    if isinstance(env.get("space"), dict):
+        kind = "shared_space"
+    elif isinstance(env.get("message"), dict):
+        kind = "message"
+    else:
+        kind = "recording"
+
+    if kind == "message":
+        msg = env.get("message") or {}
+        text = msg.get("text") or ""
+        if not text.strip():
+            res = {"ok": False, "line": "%s  FAIL  message has no text" % stamp(),
+                   "error": "empty message"}
+            write_result(res)
+            os.remove(queue_path)
+            emit(res["line"])
+            return True
+        m_pos = q.get("pos") or msg.get("pos") or ""
+        emit("  message=%s/%s pos=%s text=%s"
+             % (msg.get("pool_type"), msg.get("level"), m_pos, text[:30]))
+        rc = message_deploy.deploy(blueprint, "", dry_run=dry_run,
+                                   pos_override=m_pos, message_override=text)
+        ok = (rc == 0)
+        line = "%s  %s  message  %s  %s" % (
+            stamp(), "OK" if ok else "FAIL", msg.get("pool_type"), text[:30])
+        res = {"ok": ok, "kind": "message", "line": line, "pos": m_pos}
+        write_result(res)
+        os.remove(queue_path)
+        emit(line)
+        return True
 
     if kind == "shared_space":
         meta = env.get("meta") or {}

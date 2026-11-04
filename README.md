@@ -9,8 +9,8 @@
 > **AI 生成项目**：本项目的代码与文档由 AI（Claude）在人工指导下生成，并经过实机验证。
 > 代码可读性、边界处理和长期维护都不如人工项目，请自行审阅后再使用。
 >
-> **当前能力有限**：目前验证了**留影（Recording）**和**共享空间（Shared Space）**
-> 的保存与复制；留言（Message）尚未打通。共享空间的部署是**整份覆盖**，不是追加。
+> **当前能力**：**留影（Recording）**、**共享空间（Shared Space）**、**留言（Message）**
+> 都验证了保存与复制。共享空间的部署是**整份覆盖**，不是追加；留言只能复制文本和位置。
 >
 > **兼容性**：mod 里的地址是**硬编码到具体游戏版本**的（开发时是 Steam 版 0.35.2.426499）。
 > 游戏更新后大概率直接失效，需要重新定位函数地址。
@@ -41,6 +41,8 @@ that-sky-blueprint/
 │  ├─ deploy.py             把留影蓝图上传为新的 recording + social feed
 │  ├─ stage_import.py       共享空间 stage 文档 -> 蓝图
 │  ├─ stage_deploy.py       共享空间蓝图 -> stage/api/v1/set（+ 新建空间入口）
+│  ├─ message_import.py     留言 feed -> 蓝图（只导出打开过的）
+│  ├─ message_deploy.py     留言蓝图 -> social-feed/create
 │  ├─ deployd.py            一键部署守护进程（留影 / 共享空间自动分流）
 │  ├─ cn_import.py          国服分块 -> 蓝图
 │  ├─ bpdata.py             数据目录解析
@@ -64,6 +66,11 @@ that-sky-blueprint/
 - **部署共享空间**：`stage_deploy.py` 调 `stage/api/v1/set` 写回物件，
   再用 `social-feed/api/v1/create` 新建空间入口（`SharedSpaceCandle`）。
   注意这是**整份覆盖**，不是追加。
+- **保存留言**：留言（`MessageStone` / `MessageBoat` 等）没有 recording，内容就是
+  social feed 本身（文本 + 位置）。mod 把 feed 收进 `messages.json`，只为你**打开过**
+  的留言生成 `kind=message` 蓝图，避免附近留言刷屏。
+- **发布留言**：`message_deploy.py` 调 `social-feed/api/v1/create` 发一条新留言，
+  文本和位置可覆盖；面板选中 `kind=message` 蓝图点 Deploy 同样可用。
 - **国服只读抓取**：国服客户端可以抓取录制分块并转成蓝图（部署未完成）。
 
 ## 环境要求
@@ -199,7 +206,25 @@ python tool/stage_deploy.py other_space.skyblueprint --force --verify
 
 游戏内也可以：选中 `shared_space` 蓝图 → Deploy，面板会自动带上源空间的世界坐标。
 
-### 7. 手动查看 / 校验
+### 7. 留言（保存 / 发布）
+
+点开一条留言后，mod 记录它的 feed（`messages.json` + `message_views.json`），
+转换器只为“看过”的留言生成蓝图：
+
+```bash
+python tool/message_import.py            # 持续监控
+python tool/message_import.py --once
+python tool/message_import.py --list     # 列出抓到的留言（* = 打开过）
+```
+
+发布（文本 / 位置可以改）：
+
+```bash
+python tool/message_deploy.py message_xxx.skyblueprint
+python tool/message_deploy.py message_xxx.skyblueprint --message "新文本" --pos "(x,y,z)"
+```
+
+### 8. 手动查看 / 校验
 
 ```bash
 python tool/skybp.py list  %APPDATA%\sky-blueprint\steam\blueprints
@@ -220,6 +245,8 @@ mod 不会往安装目录写运行文件，全部落在：
     blueprints\   蓝图（.skyblueprint / index.json）
     stages\       共享空间的原始 stage 文档
     space_pos.json  作者 -> 空间世界坐标（部署新空间用）
+    messages.json   抓到的留言 feed（最多 600 条）
+    message_views.json  留言的查看时间（决定哪些生成蓝图）
     captures\     调试抓包（有数量上限）
     records\      国服录制原始分块
 ```
@@ -237,6 +264,8 @@ mod 不会往安装目录写运行文件，全部落在：
 - **stage 坐标是局部的**：物件坐标相对 stage 原点，只能写回同名 `stage_id`（同一张地图的同一位置）；新建入口的位置由 `--pos` 决定。
 - **跨服 sequence 不一致**：蓝图里的 `sequence` 是来源服务器的值，工具会先读目标服当前 `sequence/version` 再写入，直接发会得到 `400 Invalid Request`。
 - **新建入口可能受限**：`social-feed/api/v1/create` 带 `do_payment:true`，服务器可能限制每日次数或消耗货币。
+- **留言只有文本和位置**：没有附带录制内容；“复制留言”= 在原位置再发一条一样的。
+- **留言的 `personality_tag` 固定为 1**：样例不足，不同取值是否影响展示还没确认。
 - **国服部署未完成**：国服只做了抓取，创建/发布流程尚未打通。
 - **抓包会上限**：调试抓包默认限流（写请求除外），不是完整流量记录。
 

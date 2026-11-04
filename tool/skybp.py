@@ -705,16 +705,18 @@ def validate(env) -> tuple:
         warnings.append("stid 不是标准 UUID: %r" % (block["stid"],))
 
     stfs = block.get("stfs")
-    stage_space = bool(env.get("space")) and env.get("kind") == "shared_space"
+    # stage 文档 / 留言 feed 转出来的蓝图没有游戏原生状态字段
+    non_block = bool(env.get("space") or env.get("message"))
     if not isinstance(stfs, list) or not stfs:
-        if not stage_space:      # stage 文档转出来的空间本来就没有状态字段表
+        if not non_block:
             warnings.append("block 缺少 stfs 字段表")
     elif not all(isinstance(x, str) for x in stfs):
         errors.append("stfs 必须是字符串数组")
 
     players = block.get("plyr")
     if not isinstance(players, list) or not players:
-        errors.append("block 缺少 plyr")
+        if not non_block:
+            errors.append("block 缺少 plyr")
 
     chunks = env.get("chunks")
     if not isinstance(chunks, list):
@@ -819,6 +821,10 @@ def describe(env) -> str:
                     m.get("chunks", len(env.get("chunks") or [])),
                     m.get("chunk_span", "-")))
     lines.append("ppsp     : %s" % (block.get("ppsp", "-")))
+    msg = env.get("message")
+    if isinstance(msg, dict):
+        lines.append("text     : %s" % (msg.get("text") or ""))
+        lines.append("position : %s   %s" % (msg.get("pos") or "-", msg.get("pool_type") or ""))
     lines.append("notes    : %s  (events=%s, keys %s..%s)"
                  % (s.get("notes"), s.get("events"), s.get("key_min"), s.get("key_max")))
     lines.append("anims    : %s   placeables=%s   players=%s   trajectory=%s"

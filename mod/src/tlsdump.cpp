@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "bp.h"
 
 #define CJSON_HIDE_SYMBOLS
@@ -417,6 +418,175 @@ static void mergeSpacePos(const char *owner, cJSON *feed, cJSON *extra) {
   LeaveCriticalSection(&gFeedLock);
 }
 
+// ---------------------------------------------------------------------------
+// 留言：MessageStone / MessageBoat 等 feed
+//
+// 留言没有 recording，内容就是 feed 本身（content 文本 + extra_data.pos/ori）。
+//   messages.json      social_feed_id -> 完整 feed（最多 600 条）
+//   message_views.json social_feed_id -> 查看时间（用户打开过/请求过它的评论）
+// ---------------------------------------------------------------------------
+static cJSON *loadJsonFile(const char *path) {
+  FILE *f = fopen(path, "rb");
+  if (!f) return NULL;
+  fseek(f, 0, SEEK_END);
+  long n = ftell(f);
+  rewind(f);
+  if (n <= 0 || n > 8 * 1024 * 1024) {
+    fclose(f);
+    return NULL;
+  }
+  char *data = (char *)malloc((size_t)n + 1);
+  if (!data) {
+    fclose(f);
+    return NULL;
+  }
+  size_t got = fread(data, 1, (size_t)n, f);
+  data[got] = 0;
+  fclose(f);
+  cJSON *root = cJSON_Parse(data);
+  free(data);
+  return root;
+}
+
+static void saveJsonFile(const char *path, cJSON *root) {
+  char tmp[MAX_PATH];
+  snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+  char *s = cJSON_PrintUnformatted(root);
+  FILE *f = fopen(tmp, "wb");
+  if (f) {
+    if (s) fputs(s, f);
+    fclose(f);
+    MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING);
+  }
+  if (s) cJSON_free(s);
+}
+
+// 已知的留言 feed id（UUID 前缀），用于过滤“看过”记录，避免录影 feed 也触发重排
+#define BP_MSG_IDS 600
+static char gMsgIds[BP_MSG_IDS][40];
+static int gMsgIdCount = 0;
+
+static int isKnownMessage(const char *id36) {
+  for (int i = 0; i < gMsgIdCount; i++)
+    if (strcmp(gMsgIds[i], id36) == 0)
+      return 1;
+  return 0;
+}
+
+static void rememberMessageId(const char *id36) {
+  if (isKnownMessage(id36))
+    return;
+  if (gMsgIdCount >= BP_MSG_IDS)
+    return;
+  snprintf(gMsgIds[gMsgIdCount], sizeof(gMsgIds[0]), "%s", id36);
+  gMsgIdCount++;
+}
+
+static void mergeMessageFeed(cJSON *feed) {
+  if (!cJSON_IsObject(feed) || !gCtx.dataFolder[0] || !gFeedLockReady)
+    return;
+  cJSON *pool = cJSON_GetObjectItemCaseSensitive(feed, "pool_type");
+  cJSON *sid = cJSON_GetObjectItemCaseSensitive(feed, "social_feed_id");
+  cJSON *content = cJSON_GetObjectItemCaseSensitive(feed, "content");
+  if (!cJSON_IsString(pool) || !pool->valuestring ||
+      strncmp(pool->valuestring, "Message", 7) != 0)
+    return;
+  if (!cJSON_IsString(sid) || !sid->valuestring || !sid->valuestring[0])
+    return;
+  if (!cJSON_IsString(content) || !content->valuestring)
+    return;
+
+  char path[MAX_PATH];
+  snprintf(path, sizeof(path), "%s\\messages.json", gCtx.dataFolder);
+
+  EnterCriticalSection(&gFeedLock);
+  cJSON *root = loadJsonFile(path);
+  if (!cJSON_IsObject(root)) {
+    if (root) cJSON_Delete(root);
+    root = cJSON_CreateObject();
+  }
+  cJSON_DeleteItemFromObjectCaseSensitive(root, sid->valuestring);
+  cJSON_AddItemToObject(root, sid->valuestring, cJSON_Duplicate(feed, 1));
+
+  int n = cJSON_GetArraySize(root);
+  if (n > 600) {
+    cJSON *trim = cJSON_CreateObject();
+    int skip = n - 600, i = 0;
+    cJSON *it = NULL;
+    cJSON_ArrayForEach(it, root) {
+      if (i++ < skip) continue;
+      cJSON_AddItemToObject(trim, it->string, cJSON_Duplicate(it, 1));
+    }
+    cJSON_Delete(root);
+    root = trim;
+  }
+  saveJsonFile(path, root);
+  cJSON_Delete(root);
+
+  {
+    char base[40];
+    size_t k = 0;
+    while (sid->valuestring[k] && sid->valuestring[k] != ':' && k + 1 < sizeof(base)) {
+      base[k] = sid->valuestring[k];
+      k++;
+    }
+    base[k] = 0;
+    if (base[0])
+      rememberMessageId(base);
+  }
+  LeaveCriticalSection(&gFeedLock);
+
+  bpLog("message captured: %s %s", pool->valuestring, sid->valuestring);
+}
+
+static void recordMessageView(const char *buf, u32 len) {
+  if (!buf || !gCtx.dataFolder[0] || !gFeedLockReady)
+    return;
+  char path[MAX_PATH];
+  snprintf(path, sizeof(path), "%s\\message_views.json", gCtx.dataFolder);
+
+  EnterCriticalSection(&gFeedLock);
+  cJSON *root = NULL;
+  int changed = 0;
+  const char *p = buf;
+  const char *end = buf + len;
+  while ((p = memFind(p, (u32)(end - p), "\"social_feed_id\":\"")) != NULL) {
+    p += 18;
+    if (p + 36 > end)
+      break;
+    char id[40];
+    memcpy(id, p, 36);
+    id[36] = 0;
+    int ok = 1;
+    for (int i = 0; i < 36; i++) {
+      char c = id[i];
+      if (c == '-') continue;
+      if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+        ok = 0;
+    }
+    if (!ok || !isKnownMessage(id)) {
+      // 不是留言（录影 / 空间），不记“看过”，避免列表频繁重排
+    } else {
+      if (!root) {
+        root = loadJsonFile(path);
+        if (!cJSON_IsObject(root)) {
+          if (root) cJSON_Delete(root);
+          root = cJSON_CreateObject();
+        }
+      }
+      cJSON_DeleteItemFromObjectCaseSensitive(root, id);
+      cJSON_AddNumberToObject(root, id, (double)time(NULL));
+      changed = 1;
+    }
+  }
+  if (root) {
+    if (changed && cJSON_GetArraySize(root) <= 2000)
+      saveJsonFile(path, root);
+    cJSON_Delete(root);
+  }
+  LeaveCriticalSection(&gFeedLock);
+}
+
 static int isSpacePool(cJSON *feed) {
   cJSON *pool = cJSON_GetObjectItemCaseSensitive(feed, "pool_type");
   return cJSON_IsString(pool) && pool->valuestring &&
@@ -446,6 +616,7 @@ static void captureFeedFromJson(cJSON *root) {
         if (cJSON_IsString(author) && author->valuestring)
           mergeSpacePos(author->valuestring, f, extra);
       }
+      mergeMessageFeed(f);
     }
     return;
   }
@@ -461,6 +632,7 @@ static void captureFeedFromJson(cJSON *root) {
     if (cJSON_IsString(author) && author->valuestring)
       mergeSpacePos(author->valuestring, root, extra);
   }
+  mergeMessageFeed(root);
 }
 
 // 共享空间：stage/api/v1/get 返回的文档
@@ -924,13 +1096,21 @@ static int detour_SslOut(u64 ssl, void *buf, int num) {
           memFind((const char *)buf, take, "p0id"))
         captureFeedMeta((const char *)buf, take);
 
+      // 用户点开留言时会请求它的评论/反应，记录“看过”
+      if (memFind((const char *)buf, take, "\"social_feed_id\":\""))
+        recordMessageView((const char *)buf, take);
+
       // 写操作（stage set / recording create|update / feed create）不参与限流，
       // 这些是部署链路唯一可参考的样本
       // stage set 的请求体和请求头是两次 SSL_write：第二次只有 JSON。
       // 只要同时出现 stage_id + props 就当作写请求抓下来。
       int stageBody = memFind((const char *)buf, take, "\"stage_id\"") != NULL &&
                       memFind((const char *)buf, take, "\"props\"") != NULL;
-      int writeReq = stageBody ||
+      // 留言发布走 message/social-feed 服务，路径不在下面清单里，按内容识别
+      int messageBody = memFind((const char *)buf, take, "\"pool_type\":\"Message") != NULL &&
+                        memFind((const char *)buf, take, "\"private\"") != NULL;
+      int writeReq = stageBody || messageBody ||
+          memFind((const char *)buf, take, "/service/message/api/") != NULL ||
           memFind((const char *)buf, take, "/service/stage/api/v1/set") != NULL ||
           memFind((const char *)buf, take, "/service/stage/api/v1/create") != NULL ||
           memFind((const char *)buf, take, "/service/stage/api/v1/update") != NULL ||
