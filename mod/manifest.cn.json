@@ -1,0 +1,18 @@
+{
+  "package_name": "sky-blueprint",
+  "version": "0.1.0",
+  "game_edition": 3,
+  "mod_name": "Sky Blueprint (CN)",
+  "description": "Save and deploy Sky CN recordings, shared spaces and messages for local research.",
+  "main": "sky-blueprint.dll",
+  "dependencies": {},
+  "keywords": [
+    "blueprint",
+    "recording",
+    "message",
+    "sharedspace"
+  ],
+  "author": "mclvlc",
+  "license": "GPL-3.0",
+  "website": "https://github.com/mclvlc/that-sky-blueprint"
+}

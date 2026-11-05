@@ -109,7 +109,7 @@ mod/libraries/htmodloader/
 ```bash
 cd mod
 bash build.sh              # 国际服
-CN=2 bash build.sh         # 国服（只读抓取）
+CN=2 bash build.sh         # 国服（抓取 + 部署，产物 dist_cn_live/）
 # 产物: mod/dist/sky-blueprint.dll
 ```
 
@@ -128,7 +128,8 @@ git push origin v0.1.0
 
 ### 3. 安装
 
-把 `sky-blueprint.dll` 和 `manifest.json` 放进：
+国际服用 `sky-blueprint.dll` + `manifest.json`；国服用 `CN=2` 编译的 DLL + `manifest.cn.json`
+（重命名为 `manifest.json`）。放进：
 
 ```text
 <游戏目录>/htmodloader/mods/sky-blueprint/

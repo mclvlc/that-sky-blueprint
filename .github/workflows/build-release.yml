@@ -12,6 +12,7 @@ permissions:
 env:
   HTML_SDK_VERSION: v1.10.3
   ASSET_NAME: sky-blueprint-${{ github.ref_name }}.zip
+  ASSET_CN_NAME: sky-blueprint-cn-${{ github.ref_name }}.zip
 
 jobs:
   build:
@@ -64,7 +65,8 @@ jobs:
           set -euo pipefail
           cd mod
           bash build.sh
-          ls -l dist/sky-blueprint.dll
+          CN=2 bash build.sh
+          ls -l dist/sky-blueprint.dll dist_cn_live/sky-blueprint.dll
 
       - name: Package
         shell: msys2 {0}
@@ -78,7 +80,16 @@ jobs:
           cp mod/manifest.json "$name/"
           cp README.md "$name/"
           zip -r "$ASSET_NAME" "$name"
-          ls -l "$ASSET_NAME"
+
+          # 国服版：单独的 manifest（game_edition 3）
+          cn="sky-blueprint-cn"
+          rm -rf "$cn" "$ASSET_CN_NAME"
+          mkdir -p "$cn"
+          cp mod/dist_cn_live/sky-blueprint.dll "$cn/"
+          cp mod/manifest.cn.json "$cn/manifest.json"
+          cp README.md "$cn/"
+          zip -r "$ASSET_CN_NAME" "$cn"
+          ls -l "$ASSET_NAME" "$ASSET_CN_NAME"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -90,12 +101,14 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ env.ASSET_NAME }}
+          files: |
+            ${{ env.ASSET_NAME }}
+            ${{ env.ASSET_CN_NAME }}
           generate_release_notes: true
           body: |
             ## 安装
 
-            1. 下载下方的 `sky-blueprint-*.zip`，解压出 `sky-blueprint` 文件夹
+            1. 下载 `sky-blueprint-<tag>.zip`（国际服）或 `sky-blueprint-cn-<tag>.zip`（国服），解压出 `sky-blueprint` 文件夹
             2. 放到 `<游戏目录>/htmodloader/mods/sky-blueprint/`
                （需要 HTModLoader 1.8.1+）
             3. 启动游戏，按 **F2** 打开面板
