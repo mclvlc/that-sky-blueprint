@@ -306,7 +306,6 @@ mod 不会往安装目录写运行文件，全部落在：
 
 ## 已知限制
 
-- **留言未打通**：留影和共享空间可用，留言（Message）还没验证。
 - **版本绑定**：hook 地址按 0.35.2 定位，游戏更新会失效。
 - **多人留影依赖源元数据**：需要先抓到源留影的 `p0id/p1id/...`（mod 会自动从 feed 响应里提取），否则复制出来只有一个人。
 - **位置是地图坐标**：留影部署的 `pos` 是蓝图里的世界坐标，不同地图不能直接套用。
@@ -347,6 +346,7 @@ mod 不会往安装目录写运行文件，全部落在：
 - [that-sky-pianoplay](https://github.com/that-sky-project/that-sky-pianoplay) —— 同一生态下的
   乐器自动演奏工具，本项目的 README 结构参考了它。
 - [HTModLoader](https://github.com/that-sky-project) —— 本 mod 依赖的加载器与 SDK。
+- [that-sky-requestdecode](https://github.com/that-sky-project/that-sky-requestdecode) —— 国服请求/响应解密思路（session2 + RC4 + gzip）参考了该项目。
 
 ## 许可证
 
