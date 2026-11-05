@@ -505,7 +505,8 @@ static void mergeMessageFeed(cJSON *feed) {
   // 国服还有 SeasonMeditationShrineNormal（打坐神坛留言）等非 Message* 的池；
   // 留影/共享空间有各自的处理，这里排除掉即可。
   if (strncmp(pool->valuestring, "Recording", 9) == 0 ||
-      strncmp(pool->valuestring, "SharedSpace", 11) == 0)
+      strncmp(pool->valuestring, "SharedSpace", 11) == 0 ||
+      strncmp(pool->valuestring, "SocialFeed", 10) == 0)
     return;
   if (!cJSON_IsString(sid) || !sid->valuestring || !sid->valuestring[0])
     return;
