@@ -32,8 +32,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bpdata  # noqa: E402
 import skybp  # noqa: E402
 
-STAGE_DIR = os.path.join(bpdata.data_dir("steam"), "stages")
-OUT = os.path.join(bpdata.data_dir("steam"), "blueprints")   # 与 mod 默认目录一致
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# SKY_EDITION=cn 时读国服数据目录（%APPDATA%\sky-blueprint\cn）
+EDITION = os.environ.get("SKY_EDITION", "")
+if EDITION:
+    STAGE_DIR = os.path.join(bpdata.data_dir(EDITION), "stages")
+    OUT = os.path.join(bpdata.data_dir(EDITION), "blueprints")
+else:
+    STAGE_DIR = os.path.join(bpdata.data_dir("steam"), "stages")
+    OUT = os.path.join(ROOT, "samples", "fetched")
 INDEX = os.path.join(OUT, "stage_index.json")
 
 NS = uuid.UUID("6f9619ff-8b86-d011-b42d-00c04fc964ff")
@@ -100,7 +107,7 @@ def make_block(doc, stid):
 
 def load_space_pos():
     """mod 从 SharedSpace feed 抓到的“作者 -> 空间世界坐标”。"""
-    p = os.path.join(bpdata.data_dir("steam"), "space_pos.json")
+    p = os.path.join(bpdata.data_dir(EDITION or "steam"), "space_pos.json")
     try:
         with open(p, encoding="utf-8") as f:
             data = json.load(f)
@@ -140,6 +147,7 @@ def convert(path, out_dir):
             # 空间入口在世界里的坐标（来自 SharedSpaceCandle feed）
             "pos": feed.get("pos"),
             "ori": feed.get("ori"),
+            "message": feed.get("message"),
         },
     )
     env["space"] = doc
@@ -177,7 +185,8 @@ def save_index(idx, out_dir=None):
 def signature(doc, sp=None):
     sp = sp or {}
     return [doc.get("sequence"), doc.get("version"), doc.get("updated_at"),
-            len(doc.get("props") or []), sp.get("pos"), sp.get("ori")]
+            len(doc.get("props") or []), sp.get("pos"), sp.get("ori"),
+            bool(sp.get("message"))]
 
 
 def process_once(stage_dir, out_dir, index):

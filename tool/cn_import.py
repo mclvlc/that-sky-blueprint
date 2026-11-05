@@ -20,9 +20,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bpdata  # noqa: E402
 import skybp  # noqa: E402
 
-# 分块落在 %APPDATA%\sky-blueprint\cn\records\
-MOD_DIRS = bpdata.record_dirs("cn")
-OUT = os.path.join(bpdata.data_dir("steam"), "blueprints")   # 与 mod 默认目录一致
+# 分块现在落在 %APPDATA%\sky-blueprint\cn\records\，旧的 mod 目录只读回退
+# SKY_EDITION=cn 时输出到 %APPDATA%\sky-blueprint\cn\blueprints（国服面板默认目录）
+EDITION = os.environ.get("SKY_EDITION", "")
+MOD_DIRS = bpdata.record_dirs(EDITION or "cn")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if EDITION:
+    OUT = os.path.join(bpdata.data_dir(EDITION), "blueprints")
+else:
+    OUT = os.path.join(ROOT, "samples", "fetched")
 INDEX = os.path.join(OUT, "cn_import_index.json")
 
 
@@ -50,8 +56,31 @@ def latest_link(mod_dirs):
     return lines[-1] if lines else ""
 
 
+def _rec_id_from_name(path):
+    """cn_chunk_<recording_id>_<start>.bin -> recording_id"""
+    name = os.path.basename(path)
+    if not name.startswith("cn_chunk_"):
+        return ""
+    rest = name[len("cn_chunk_"):]
+    if "_" not in rest:
+        return ""
+    head, _ = rest.rsplit("_", 1)
+    return head if len(head) >= 32 else ""
+
+
+def load_feed_meta():
+    p = os.path.join(bpdata.data_dir(EDITION or "steam"), "feed_meta.json")
+    try:
+        with open(p, encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
 def scan_chunks(mod_dirs):
     groups = {}
+    stid_rec = {}
     files = []
     for d in mod_dirs:
         files += sorted(glob.glob(os.path.join(d, "cn_chunk_*.bin")))
@@ -60,6 +89,7 @@ def scan_chunks(mod_dirs):
             raw = open(p, "rb").read().decode("utf-8", "replace")
         except Exception:
             continue
+        rec_id = _rec_id_from_name(p)
         for line in raw.splitlines():
             line = line.strip()
             if not line:
@@ -71,20 +101,30 @@ def scan_chunks(mod_dirs):
             rd = obj.get("recording_data")
             if isinstance(rd, dict) and rd.get("stid"):
                 groups.setdefault(rd["stid"], []).append(rd)
-    return groups
+                if rec_id:
+                    stid_rec.setdefault(rd["stid"], rec_id)
+    return groups, stid_rec
 
 
 def process_once(mod_dirs, out_dir, index):
-    groups = scan_chunks(mod_dirs)
+    groups, stid_rec = scan_chunks(mod_dirs)
+    feed_meta = load_feed_meta()
     link = latest_link(mod_dirs)
     changed = 0
     for stid, blocks in groups.items():
         blocks.sort(key=lambda b: float(b.get("chet", 0)))
-        sig = [len(blocks), max((float(b.get("chet", 0)) for b in blocks), default=0)]
+        fm0 = feed_meta.get(stid_rec.get(stid, "")) or {}
+        sig = [len(blocks), max((float(b.get("chet", 0)) for b in blocks), default=0),
+               bool(fm0.get("message"))]
         if index.get(stid) == sig:
             continue
         try:
-            env = skybp.build_envelope(blocks, source=link)
+            fm = fm0
+            extra = {k: fm.get(k) for k in
+                     ("level_id", "pos", "ori", "message", "social_feed_id")}
+            env = skybp.build_envelope(blocks, source=link,
+                                       pool_type=fm.get("pool_type") or None,
+                                       extra_meta=extra)
             path = os.path.join(out_dir, stid + ".skyblueprint")
             skybp.pack(env, path)
             s = env["summary"]

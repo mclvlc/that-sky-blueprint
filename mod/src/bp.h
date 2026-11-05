@@ -83,6 +83,15 @@ int bpDumpOk(unsigned idx, unsigned cap);
 // 当前连接的服务器地址（写到 <data>/server.txt，Python 部署工具会读）
 void bpWriteServerHost(const char *host);
 
+// 国服 hook 复用国际服的 stage / feed 解析（tlsdump.cpp 实现）
+void bpCaptureLocksInit(void);
+void bpCaptureStageJson(const char *buf, u32 len);
+void bpCaptureFeedJson(const char *buf, u32 len);
+// 国服 stage 文档有时不带 user_id，用当前登录用户兜底
+void bpCaptureSetOwnerFallback(const char *owner);
+// 国服解密后的出站 JSON（记录看过的留言）
+void bpCaptureOutboundJson(const char *buf, u32 len);
+
 // UI
 void bpUIWindowMain(void);
 

@@ -235,6 +235,11 @@ static void captureSession(const char *buf, u32 len) {
 static CRITICAL_SECTION gFeedLock;
 static int gFeedLockReady = 0;
 static char gFeedPath[MAX_PATH] = {0};
+// 国服 stage 文档缺 user_id 时的兜底（cnlive 会设置成当前登录用户）
+static char gOwnerFallback[80] = {0};
+
+static void writeMessageView(const char *id, time_t ts);
+static int takePendingView(const char *id, time_t *ts);
 
 static void feedPathInit(void) {
   if (!gFeedPath[0] && gCtx.dataFolder[0])
@@ -361,8 +366,14 @@ static void mergeFeedMeta(const char *resource, cJSON *feed, cJSON *extra) {
 static void mergeSpacePos(const char *owner, cJSON *feed, cJSON *extra) {
   if (!owner || !owner[0] || !gCtx.dataFolder[0])
     return;
+  // 有些共享空间入口（如神坛）没有 pos，但 message/level 仍然值得记录
   cJSON *pos = cJSON_GetObjectItemCaseSensitive(extra, "pos");
-  if (!cJSON_IsString(pos) || !pos->valuestring || !pos->valuestring[0])
+  int hasPos = cJSON_IsString(pos) && pos->valuestring && pos->valuestring[0];
+  cJSON *lvl = cJSON_GetObjectItemCaseSensitive(feed, "level_id");
+  cJSON *msg = cJSON_GetObjectItemCaseSensitive(feed, "message");
+  int hasText = (cJSON_IsString(msg) && msg->valuestring && msg->valuestring[0]) ||
+                (cJSON_IsString(lvl) && lvl->valuestring && lvl->valuestring[0]);
+  if (!hasPos && !hasText)
     return;
   if (!gFeedLockReady)
     return;
@@ -488,12 +499,20 @@ static void mergeMessageFeed(cJSON *feed) {
   cJSON *pool = cJSON_GetObjectItemCaseSensitive(feed, "pool_type");
   cJSON *sid = cJSON_GetObjectItemCaseSensitive(feed, "social_feed_id");
   cJSON *content = cJSON_GetObjectItemCaseSensitive(feed, "content");
-  if (!cJSON_IsString(pool) || !pool->valuestring ||
-      strncmp(pool->valuestring, "Message", 7) != 0)
+  cJSON *message = cJSON_GetObjectItemCaseSensitive(feed, "message");
+  if (!cJSON_IsString(pool) || !pool->valuestring)
+    return;
+  // 国服还有 SeasonMeditationShrineNormal（打坐神坛留言）等非 Message* 的池；
+  // 留影/共享空间有各自的处理，这里排除掉即可。
+  if (strncmp(pool->valuestring, "Recording", 9) == 0 ||
+      strncmp(pool->valuestring, "SharedSpace", 11) == 0)
     return;
   if (!cJSON_IsString(sid) || !sid->valuestring || !sid->valuestring[0])
     return;
-  if (!cJSON_IsString(content) || !content->valuestring)
+  // 国服 feed 只有 message，没有 content
+  int hasText = (cJSON_IsString(content) && content->valuestring) ||
+                (cJSON_IsString(message) && message->valuestring);
+  if (!hasText)
     return;
 
   char path[MAX_PATH];
@@ -531,23 +550,72 @@ static void mergeMessageFeed(cJSON *feed) {
       k++;
     }
     base[k] = 0;
-    if (base[0])
+    if (base[0]) {
       rememberMessageId(base);
+      time_t ts = 0;
+      if (takePendingView(base, &ts))
+        writeMessageView(base, ts);
+    }
   }
   LeaveCriticalSection(&gFeedLock);
 
   bpLog("message captured: %s %s", pool->valuestring, sid->valuestring);
 }
 
-static void recordMessageView(const char *buf, u32 len) {
-  if (!buf || !gCtx.dataFolder[0] || !gFeedLockReady)
+// 还没见过 feed 的“查看”先挂起：等对应留言 feed 到达时再补记，
+// 解决“先请求评论、后下发留言列表”的顺序问题。
+#define BP_PEND_VIEWS 128
+static char gPendIds[BP_PEND_VIEWS][40];
+static time_t gPendTs[BP_PEND_VIEWS];
+static int gPendCount = 0;
+
+static void addPendingView(const char *id, time_t ts) {
+  for (int i = 0; i < gPendCount; i++) {
+    if (strcmp(gPendIds[i], id) == 0) { gPendTs[i] = ts; return; }
+  }
+  if (gPendCount < BP_PEND_VIEWS) {
+    snprintf(gPendIds[gPendCount], sizeof(gPendIds[0]), "%s", id);
+    gPendTs[gPendCount] = ts;
+    gPendCount++;
+  }
+}
+
+static int takePendingView(const char *id, time_t *ts) {
+  for (int i = 0; i < gPendCount; i++) {
+    if (strcmp(gPendIds[i], id) == 0) {
+      *ts = gPendTs[i];
+      gPendCount--;
+      memcpy(gPendIds[i], gPendIds[gPendCount], sizeof(gPendIds[0]));
+      gPendTs[i] = gPendTs[gPendCount];
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static void writeMessageView(const char *id, time_t ts) {
+  if (!id || !id[0] || !gCtx.dataFolder[0] || !gFeedLockReady)
     return;
   char path[MAX_PATH];
   snprintf(path, sizeof(path), "%s\\message_views.json", gCtx.dataFolder);
-
   EnterCriticalSection(&gFeedLock);
-  cJSON *root = NULL;
-  int changed = 0;
+  cJSON *root = loadJsonFile(path);
+  if (!cJSON_IsObject(root)) {
+    if (root) cJSON_Delete(root);
+    root = cJSON_CreateObject();
+  }
+  cJSON_DeleteItemFromObjectCaseSensitive(root, id);
+  cJSON_AddNumberToObject(root, id, (double)ts);
+  if (cJSON_GetArraySize(root) <= 2000)
+    saveJsonFile(path, root);
+  cJSON_Delete(root);
+  LeaveCriticalSection(&gFeedLock);
+  bpLog("message view: %s", id);
+}
+
+static void recordMessageView(const char *buf, u32 len) {
+  if (!buf || !gCtx.dataFolder[0] || !gFeedLockReady)
+    return;
   const char *p = buf;
   const char *end = buf + len;
   while ((p = memFind(p, (u32)(end - p), "\"social_feed_id\":\"")) != NULL) {
@@ -564,27 +632,21 @@ static void recordMessageView(const char *buf, u32 len) {
       if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
         ok = 0;
     }
-    if (!ok || !isKnownMessage(id)) {
-      // 不是留言（录影 / 空间），不记“看过”，避免列表频繁重排
-    } else {
-      if (!root) {
-        root = loadJsonFile(path);
-        if (!cJSON_IsObject(root)) {
-          if (root) cJSON_Delete(root);
-          root = cJSON_CreateObject();
-        }
-      }
-      cJSON_DeleteItemFromObjectCaseSensitive(root, id);
-      cJSON_AddNumberToObject(root, id, (double)time(NULL));
-      changed = 1;
-    }
+    if (!ok)
+      continue;
+    // 不管是否已知都先记录；未知的先挂起，等 feed 到了再补一次
+    EnterCriticalSection(&gFeedLock);
+    int known = isKnownMessage(id);
+    if (!known)
+      addPendingView(id, time(NULL));
+    LeaveCriticalSection(&gFeedLock);
+    writeMessageView(id, time(NULL));
   }
-  if (root) {
-    if (changed && cJSON_GetArraySize(root) <= 2000)
-      saveJsonFile(path, root);
-    cJSON_Delete(root);
-  }
-  LeaveCriticalSection(&gFeedLock);
+}
+
+// 国服（cnlive）解密后的出站 JSON：目前用于记录“看过的留言”
+void bpCaptureOutboundJson(const char *buf, u32 len) {
+  recordMessageView(buf, len);
 }
 
 static int isSpacePool(cJSON *feed) {
@@ -593,46 +655,55 @@ static int isSpacePool(cJSON *feed) {
          strncmp(pool->valuestring, "SharedSpace", 11) == 0;
 }
 
-static void captureFeedFromJson(cJSON *root) {
-  if (!cJSON_IsObject(root))
+static void processFeedObject(cJSON *f) {
+  if (!cJSON_IsObject(f))
     return;
-
-  cJSON *feeds = cJSON_GetObjectItemCaseSensitive(root, "feeds");
-  if (cJSON_IsArray(feeds)) {
-    cJSON *f = NULL;
-    cJSON_ArrayForEach(f, feeds) {
-      if (!cJSON_IsObject(f))
-        continue;
-      cJSON *extra = cJSON_GetObjectItemCaseSensitive(f, "extra_data");
-      cJSON *res = NULL;
-      if (cJSON_IsObject(extra))
-        res = cJSON_GetObjectItemCaseSensitive(extra, "resource_id");
-      if (!cJSON_IsString(res))
-        res = cJSON_GetObjectItemCaseSensitive(f, "resource_id");
-      if (cJSON_IsString(res) && res->valuestring)
-        mergeFeedMeta(res->valuestring, f, extra);
-      if (isSpacePool(f) && cJSON_IsObject(extra)) {
-        cJSON *author = cJSON_GetObjectItemCaseSensitive(f, "author_id");
-        if (cJSON_IsString(author) && author->valuestring)
-          mergeSpacePos(author->valuestring, f, extra);
-      }
-      mergeMessageFeed(f);
-    }
-    return;
-  }
-
-  cJSON *extra = cJSON_GetObjectItemCaseSensitive(root, "extra_data");
+  cJSON *extra = cJSON_GetObjectItemCaseSensitive(f, "extra_data");
   cJSON *res = NULL;
   if (cJSON_IsObject(extra))
     res = cJSON_GetObjectItemCaseSensitive(extra, "resource_id");
+  if (!cJSON_IsString(res))
+    res = cJSON_GetObjectItemCaseSensitive(f, "resource_id");
   if (cJSON_IsString(res) && res->valuestring)
-    mergeFeedMeta(res->valuestring, root, extra);
-  if (isSpacePool(root) && cJSON_IsObject(extra)) {
-    cJSON *author = cJSON_GetObjectItemCaseSensitive(root, "author_id");
-    if (cJSON_IsString(author) && author->valuestring)
-      mergeSpacePos(author->valuestring, root, extra);
+    mergeFeedMeta(res->valuestring, f, extra);
+  if (isSpacePool(f) && cJSON_IsObject(extra)) {
+    cJSON *author = cJSON_GetObjectItemCaseSensitive(f, "author_id");
+    if (!cJSON_IsString(author) || !author->valuestring || !author->valuestring[0])
+      author = cJSON_GetObjectItemCaseSensitive(f, "user_id");
+    if (cJSON_IsString(author) && author->valuestring) {
+      char owner[80];
+      size_t k = 0;
+      while (author->valuestring[k] && author->valuestring[k] != ':' &&
+             k + 1 < sizeof(owner)) {
+        owner[k] = author->valuestring[k];
+        k++;
+      }
+      owner[k] = 0;
+      if (owner[0])
+        mergeSpacePos(owner, f, extra);
+    }
   }
-  mergeMessageFeed(root);
+  mergeMessageFeed(f);
+}
+
+// 国服 feed 列表是 {"inner_ring":{"public":[...]},"outer_ring":...}，
+// 不是统一的 "feeds" 数组，所以递归找所有 feed 对象。
+static void walkFeedTree(cJSON *node) {
+  if (cJSON_IsObject(node)) {
+    cJSON *sid = cJSON_GetObjectItemCaseSensitive(node, "social_feed_id");
+    cJSON *pool = cJSON_GetObjectItemCaseSensitive(node, "pool_type");
+    if (cJSON_IsString(sid) || cJSON_IsString(pool))
+      processFeedObject(node);
+    for (cJSON *c = node->child; c; c = c->next)
+      walkFeedTree(c);
+  } else if (cJSON_IsArray(node)) {
+    cJSON *c = NULL;
+    cJSON_ArrayForEach(c, node) walkFeedTree(c);
+  }
+}
+
+static void captureFeedFromJson(cJSON *root) {
+  walkFeedTree(root);
 }
 
 // 共享空间：stage/api/v1/get 返回的文档
@@ -662,8 +733,11 @@ static void captureStageFromJson(cJSON *root) {
     return;
 
   cJSON *uid = cJSON_GetObjectItemCaseSensitive(root, "user_id");
-  const char *owner = (cJSON_IsString(uid) && uid->valuestring && uid->valuestring[0])
-                      ? uid->valuestring : "unknown";
+  int hasOwner = cJSON_IsString(uid) && uid->valuestring && uid->valuestring[0];
+  const char *owner = hasOwner ? uid->valuestring
+                               : (gOwnerFallback[0] ? gOwnerFallback : "unknown");
+  if (!hasOwner && gOwnerFallback[0])
+    cJSON_AddStringToObject(root, "user_id", gOwnerFallback);
 
   char dir[MAX_PATH];
   snprintf(dir, sizeof(dir), "%s\\stages", gCtx.dataFolder);
@@ -695,6 +769,60 @@ static void captureStageFromJson(cJSON *root) {
   bpListNotifyViewedStage(sid->valuestring, owner);
   bpLog("stage captured: %s owner=%s props=%d",
         sid->valuestring, owner, cJSON_GetArraySize(props));
+}
+
+void bpCaptureSetOwnerFallback(const char *owner) {
+  if (!owner) return;
+  snprintf(gOwnerFallback, sizeof(gOwnerFallback), "%s", owner);
+}
+
+// 国服（cnlive）复用：初始化解析用的锁（不做 TLS hook）
+void bpCaptureLocksInit(void) {
+  if (!gFeedLockReady) {
+    InitializeCriticalSection(&gFeedLock);
+    gFeedLockReady = 1;
+  }
+}
+
+// 国服（cnlive）复用：一段完整 JSON -> stage 文档 / feed 元数据
+void bpCaptureStageJson(const char *buf, u32 len) {
+  if (!buf || len < 32)
+    return;
+  const char *p = memFind(buf, len, "{");
+  if (!p)
+    return;
+  u32 n = (u32)(buf + len - p);
+  char *copy = (char *)malloc(n + 1);
+  if (!copy)
+    return;
+  memcpy(copy, p, n);
+  copy[n] = 0;
+  cJSON *root = cJSON_Parse(copy);
+  free(copy);
+  if (!root)
+    return;
+  captureStageFromJson(root);
+  cJSON_Delete(root);
+}
+
+void bpCaptureFeedJson(const char *buf, u32 len) {
+  if (!buf || len < 32)
+    return;
+  const char *p = memFind(buf, len, "{");
+  if (!p)
+    return;
+  u32 n = (u32)(buf + len - p);
+  char *copy = (char *)malloc(n + 1);
+  if (!copy)
+    return;
+  memcpy(copy, p, n);
+  copy[n] = 0;
+  cJSON *root = cJSON_Parse(copy);
+  free(copy);
+  if (!root)
+    return;
+  captureFeedFromJson(root);
+  cJSON_Delete(root);
 }
 
 static void captureFeedMeta(const char *buf, u32 len) {

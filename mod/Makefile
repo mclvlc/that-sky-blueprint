@@ -28,7 +28,7 @@ CFLAGS += -I./libraries/htmodloader/includes/imgui-1.92.2b -I./libraries/htmodlo
 CFLAGS += -I./libraries/htmodloader/includes/htmodloader
 
 LFLAGS = -Wl,--gc-sections,-O2,--as-needed,--version-script=$(VERSION_SCRIPT)
-LFLAGS += -L./libraries/htmodloader/lib -lhtmodloader -lshell32
+LFLAGS += -L./libraries/htmodloader/lib -lhtmodloader -lshell32 -lz
 
 vpath %.c $(SRC_DIRS)
 vpath %.cpp $(SRC_DIRS)

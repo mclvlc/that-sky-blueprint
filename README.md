@@ -44,7 +44,10 @@ that-sky-blueprint/
 │  ├─ message_import.py     留言 feed -> 蓝图（只导出打开过的）
 │  ├─ message_deploy.py     留言蓝图 -> social-feed/create
 │  ├─ deployd.py            一键部署守护进程（留影 / 共享空间自动分流）
-│  ├─ cn_import.py          国服分块 -> 蓝图
+│  ├─ cn_import.py          国服分块 -> 蓝图（含 feed 文案）
+│  ├─ cn_deploy.py          国服部署（加密请求：留影 / 共享空间 / 留言）
+│  ├─ bridge_blueprint.py   把国服蓝图复制到国际服蓝图目录
+│  ├─ backfill_caption.py   给旧蓝图补 meta.message（部署时自动填 Message）
 │  ├─ bpdata.py             数据目录解析
 │  └─ reqdump.py            解析抓到的请求（排障用）
 └─ docs/
@@ -71,7 +74,12 @@ that-sky-blueprint/
   的留言生成 `kind=message` 蓝图，避免附近留言刷屏。
 - **发布留言**：`message_deploy.py` 调 `social-feed/api/v1/create` 发一条新留言，
   文本和位置可覆盖；面板选中 `kind=message` 蓝图点 Deploy 同样可用。
-- **国服只读抓取**：国服客户端可以抓取录制分块并转成蓝图（部署未完成）。
+- **国服抓取/部署**：国服请求体是 `RC4(session2) + Base64`，响应按
+  `gzip` / `session-valid` / `gzip-session-valid` 解码后复用国际服的解析。
+  已实测可保存并部署国服留影、共享空间、留言（`cn_deploy.py`）。
+- **文案自动填充**：抓取时顺手保存 feed 的 `message`（留影配文、共享空间入口文案、
+  留言文本），面板选中蓝图时自动填进 `Message` 框；旧蓝图可用
+  `backfill_caption.py` 补。
 
 ## 环境要求
 
@@ -79,6 +87,7 @@ that-sky-blueprint/
 - Steam 版 Sky（开发验证版本 **0.35.2.426499**），或网易国服客户端（仅抓取）
 - [HTModLoader](https://github.com/that-sky-project) **1.8.1+**（含 SDK）
 - MSYS2 + mingw64 g++（`/c/msys64/ucrt64/bin`）
+- zlib 开发包（`mingw-w64-ucrt-x86_64-zlib`，国服解码用）
 - Python 3.8+
 
 构建前把 HTModLoader SDK 放到：
@@ -239,7 +248,34 @@ python tool/message_deploy.py message_xxx.skyblueprint
 python tool/message_deploy.py message_xxx.skyblueprint --message "新文本" --pos "(x,y,z)"
 ```
 
-### 9. 手动查看 / 校验
+### 9. 国服（网易）
+
+国服客户端需要 CN 版 DLL（`CN=2 bash build.sh`），数据目录是 `%APPDATA%\sky-blueprint\cn\`。
+
+```bash
+# 保存（三路并行）
+SKY_EDITION=cn python tool/cn_import.py       # 留影分块 -> 蓝图
+SKY_EDITION=cn python tool/stage_import.py    # 共享空间 stage
+SKY_EDITION=cn python tool/message_import.py  # 留言
+
+# 一键部署守护进程（国服队列独立）
+SKY_EDITION=cn python tool/deployd.py
+
+# 手动部署（加密请求）
+python tool/cn_deploy.py <file.skyblueprint>              # 共享空间
+python tool/cn_deploy.py <file.skyblueprint> --recording  # 留影
+python tool/cn_deploy.py <file.skyblueprint>              # 留言（自动识别 message 段）
+```
+
+国服机制：
+
+- 请求体：`{"user":"…","body": Base64(RC4(session2, json))}`
+- 响应头 `content-encoding` 决定解码方式（`gzip` / `session-valid` / `gzip-session-valid`）
+- `session2` 从登录响应提取，mod 写到 `cn\session2.txt`（**敏感文件，不要外传**）
+- 部署需要 `cn\session.json`（user/session/host）与 `cn\session2.txt`，由 mod 自动维护
+- 构建需要 zlib（MSYS2 里装 `mingw-w64-ucrt-x86_64-zlib`）
+
+### 10. 手动查看 / 校验
 
 ```bash
 python tool/skybp.py list  %APPDATA%\sky-blueprint\steam\blueprints
@@ -281,7 +317,9 @@ mod 不会往安装目录写运行文件，全部落在：
 - **新建入口可能受限**：`social-feed/api/v1/create` 带 `do_payment:true`，服务器可能限制每日次数或消耗货币。
 - **留言只有文本和位置**：没有附带录制内容；“复制留言”= 在原位置再发一条一样的。
 - **留言的 `personality_tag` 固定为 1**：样例不足，不同取值是否影响展示还没确认。
-- **国服部署未完成**：国服只做了抓取，创建/发布流程尚未打通。
+- **国服部署依赖 session2**：`cn\session2.txt` 是登录密钥派生物，泄漏等于泄露账号会话。
+- **跨服搬运**：国服 block 的 `stfs` 多一个 `en` 字段，结构基本通用；用 `tool/bridge_blueprint.py` 把国服蓝图复制到国际服目录后再部署。国服专属动画/物件在国际服可能缺失。
+- **文案来源**：蓝图配文来自抓取时的 feed；早期没抓到 feed 的蓝图需要用 `tool/backfill_caption.py` 补，补不到的就保持默认。
 - **抓包会上限**：调试抓包默认限流（写请求除外），不是完整流量记录。
 
 ## 风险与免责声明
@@ -297,9 +335,11 @@ mod 不会往安装目录写运行文件，全部落在：
    分享给他人，也不要提交到仓库。
 4. **覆盖风险**：部署共享空间会整份覆盖你当前的物件列表；部署留影会在世界里
    多出一个留影。操作前请先用工具保存现有蓝图，便于回滚。
-5. **稳定性**：mod 通过 inline hook 修改游戏函数，可能崩溃、丢失未保存内容，
+5. **国服会话密钥**：`session2.txt`、`session.json` 不要上传或分享；国服的请求加解密
+   属于逆向实现，服务器更新后可能失效。
+6. **稳定性**：mod 通过 inline hook 修改游戏函数，可能崩溃、丢失未保存内容，
    或与其他 mod 冲突。
-6. **无担保**：本项目按 GPL-3.0 “原样”提供，不提供任何明示或暗示的担保；
+7. **无担保**：本项目按 GPL-3.0 “原样”提供，不提供任何明示或暗示的担保；
    使用造成的一切后果由使用者自行承担。
 
 ## 相关项目

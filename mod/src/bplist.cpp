@@ -30,6 +30,7 @@ typedef struct {
   char viewKey[192];    // 最近查看的匹配键：留影用 recording id，共享空间用 stage:ID:owner
   char created[40];
   char note[192];
+  char caption[192];    // 来源 feed/留言的文本，部署时预填 Message
   char timeStr[32];
   long long viewTime;   // 最近查看的 Unix 秒；0=没看过
   char source[512];
@@ -298,6 +299,15 @@ static void parseBlueprint(BpListItem *it) {
     // 共享空间没有 recording id，用 stage_id + owner 作为“最近查看”的键
     snprintf(it->feedPos, sizeof(it->feedPos), "%s", jstr(meta, "pos"));
     snprintf(it->feedOri, sizeof(it->feedOri), "%s", jstr(meta, "ori"));
+
+    // 抓取时顺手保存的 caption/留言文本，部署时预填 Message
+    const char *cap = jstr(meta, "message");
+    if (!cap[0]) {
+      cJSON *mo = jobj(root, "message");
+      if (cJSON_IsObject(mo))
+        cap = jstr(mo, "text");
+    }
+    snprintf(it->caption, sizeof(it->caption), "%s", cap);
 
     const char *stageId = jstr(meta, "stage_id");
     const char *ownerId = jstr(meta, "owner_id");
@@ -1110,6 +1120,8 @@ void bpListUI(void) {
         snprintf(gDeploySelPath, sizeof(gDeploySelPath), "%s", it->path);
         gDeploySel = gSelected;
         snprintf(gNoteEdit, sizeof(gNoteEdit), "%s", it->note);
+        if (it->caption[0])
+          snprintf(gDeployMsg, sizeof(gDeployMsg), "%s", it->caption);
         const char *raw = NULL;
         if ((strcmp(it->kind, "shared_space") == 0 ||
              strcmp(it->kind, "message") == 0) && it->feedPos[0]) {

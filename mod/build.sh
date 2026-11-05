@@ -24,7 +24,7 @@ elif [ "$CN" = "2" ]; then
 fi
 INC="-I./src -I./libraries/htmodloader/includes/imgui-1.92.2b -I./libraries/htmodloader/includes/imgui-1.92.2b/backends -I./libraries/htmodloader/includes/htmodloader"
 CFLAGS="-O2 -ffunction-sections -fdata-sections -static -s -mavx -msse -Wall -Wno-unused-const-variable -Wno-unused-function -Wno-missing-braces $DEFS"
-LFLAGS="-Wl,--gc-sections,-O2,--as-needed,--version-script=src/exports.txt -L./libraries/htmodloader/lib -lhtmodloader -lshell32"
+LFLAGS="-Wl,--gc-sections,-O2,--as-needed,--version-script=src/exports.txt -L./libraries/htmodloader/lib -lhtmodloader -lshell32 -lz"
 
 mkdir -p "$OUT"
 rm -f "$OUT"/*.o "$OUT"/sky-blueprint.dll

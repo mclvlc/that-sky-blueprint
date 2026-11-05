@@ -33,10 +33,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bpdata  # noqa: E402
 import skybp  # noqa: E402
 
-DATA = bpdata.data_dir("steam")
+# SKY_EDITION=cn 时读国服数据目录
+EDITION = os.environ.get("SKY_EDITION", "")
+DATA = bpdata.data_dir(EDITION or "steam")
 MESSAGES = os.path.join(DATA, "messages.json")
 VIEWS = os.path.join(DATA, "message_views.json")
-OUT = os.path.join(bpdata.data_dir("steam"), "blueprints")   # 与 mod 默认目录一致
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if EDITION:
+    OUT = os.path.join(DATA, "blueprints")
+else:
+    OUT = os.path.join(ROOT, "samples", "fetched")   # 与 mod 面板默认目录一致
 INDEX = os.path.join(OUT, "message_index.json")
 
 NS = uuid.UUID("6f9619ff-8b86-d011-b42d-00c04fc964ff")
@@ -82,6 +88,8 @@ def build_blueprint(sid, feed):
     pool = feed.get("pool_type") or "MessageStone"
     level = feed.get("level_id") or feed.get("pool_name") or ""
     author = feed.get("author_id") or ""
+    if not author and isinstance(feed.get("user_id"), str):
+        author = feed["user_id"].split(":")[0]
     pos = extra(feed, "pos")
     ori = extra(feed, "ori")
     stid = str(uuid.uuid5(NS, "message/%s" % sid))
@@ -148,6 +156,9 @@ def process_once():
             continue
         text = message_text(feed)
         if not text:
+            continue
+        # SocialFeedPenpal / SocialFeedComment 不是留言
+        if str(feed.get("pool_type") or "").startswith("SocialFeed"):
             continue
         sig = [view_ts, text, feed.get("create_at")]
         if index.get(sid) == sig:

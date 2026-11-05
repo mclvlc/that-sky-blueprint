@@ -20,12 +20,14 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bpdata  # noqa: E402
+import cn_deploy  # noqa: E402
 import deploy  # noqa: E402
 import message_deploy  # noqa: E402
 import stage_deploy  # noqa: E402
 
-# mod 现在把队列/session/结果写到数据目录，旧位置仅作迁移期回退
-DATA_DIR = bpdata.data_dir("steam")
+# SKY_EDITION=cn 时监听国服队列（%APPDATA%\sky-blueprint\cn）
+EDITION = os.environ.get("SKY_EDITION", "steam")
+DATA_DIR = bpdata.data_dir(EDITION)
 QUEUE = os.path.join(DATA_DIR, "deploy_queue.json")
 SESSION = os.path.join(DATA_DIR, "session.json")
 RESULT_TXT = os.path.join(DATA_DIR, "deploy_result.txt")
@@ -58,6 +60,14 @@ def write_result(res):
 
 def stamp():
     return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _pick_message(q, msg):
+    """面板 Message 输入框优先（默认值 "Blueprint" 视为未修改）。"""
+    typed = (q.get("message") or "").strip()
+    if typed and typed != "Blueprint":
+        return typed
+    return msg.get("text") or ""
 
 
 def process_queue(dry_run=False):
@@ -102,7 +112,8 @@ def process_queue(dry_run=False):
 
     emit("  user=%s level=%s pool=%s" % (user, level, pool_type))
 
-    # 类型以蓝图内容为准：space 段=共享空间，message 段=留言，其余=留影
+    # 类型以蓝图内容为准：有 space 段=共享空间，有 message 段=留言，其余=留影。
+    # 不能只看 kind 字段：老蓝图可能是按内容猜的，会把留影误标成 shared_space。
     try:
         env = deploy.skybp.load(blueprint)
     except Exception:
@@ -114,9 +125,37 @@ def process_queue(dry_run=False):
     else:
         kind = "recording"
 
+    # 国服留影：加密 create -> update -> feed create
+    if EDITION == "cn" and kind == "recording":
+        emit("  [cn] recording level=%s pool=%s chunks=%s"
+             % (level, pool_type, len(env.get("chunks") or [])))
+        rc = cn_deploy.deploy_recording(blueprint, level=level, pool_type=pool_type,
+                                        message=message, dry_run=dry_run)
+        ok = (rc == 0)
+        line = "%s  %s  recording(cn)  %s  chunks=%s" % (
+            stamp(), "OK" if ok else "FAIL", level, len(env.get("chunks") or []))
+        res = {"ok": ok, "kind": "recording", "line": line, "level": level}
+        write_result(res)
+        os.remove(queue_path)
+        emit(line)
+        return True
+    if EDITION == "cn" and kind == "message":
+        msg = env.get("message") or {}
+        text = _pick_message(q, msg)
+        rc = cn_deploy.deploy_message(blueprint, text, dry_run=dry_run)
+        ok = (rc == 0)
+        line = "%s  %s  message(cn)  %s  %s" % (
+            stamp(), "OK" if ok else "FAIL", msg.get("pool_type"), text[:30])
+        res = {"ok": ok, "kind": "message", "line": line}
+        write_result(res)
+        os.remove(queue_path)
+        emit(line)
+        return True
+
+    # 留言：发一条新的 social feed（MessageBoat / MessageStone）
     if kind == "message":
         msg = env.get("message") or {}
-        text = msg.get("text") or ""
+        text = _pick_message(q, msg)
         if not text.strip():
             res = {"ok": False, "line": "%s  FAIL  message has no text" % stamp(),
                    "error": "empty message"}
@@ -140,7 +179,23 @@ def process_queue(dry_run=False):
 
     if kind == "shared_space":
         meta = env.get("meta") or {}
-        payload = stage_deploy.build_payload(env.get("space") or {}, user, session)
+        if EDITION == "cn":
+            props_count = len((env.get("space") or {}).get("props") or [])
+            emit("  [cn] space=%s props=%d create=%s"
+                 % (meta.get("stage_id"), props_count, bool(q.get("create"))))
+            rc = cn_deploy.deploy_space(blueprint, create=bool(q.get("create")),
+                                        dry_run=dry_run)
+            ok = (rc == 0)
+            line = ("%s  %s  shared_space(cn)  stage=%s  props=%d"
+                    % (stamp(), "OK" if ok else "FAIL",
+                       meta.get("stage_id") or "?", props_count))
+            res = {"ok": ok, "kind": "shared_space", "line": line,
+                   "stage_id": meta.get("stage_id")}
+            write_result(res)
+            os.remove(queue_path)
+            emit(line)
+            return True
+        sp = stage_deploy.build_payload(env.get("space") or {}, user, session)
         s_pos = q.get("pos") or meta.get("pos") or ""
         s_ori = q.get("ori") or meta.get("ori") or "(0,0,0,1)"
         if not s_pos:
@@ -151,14 +206,14 @@ def process_queue(dry_run=False):
             emit(res["line"])
             return True
         emit("  space=%s props=%d pos=%s"
-             % (meta.get("stage_id") or "?", len(payload.get("props") or []), s_pos))
+             % (meta.get("stage_id") or sp.get("stage_id"), len(sp.get("props") or []), s_pos))
         rc = stage_deploy.deploy(blueprint, "", dry_run=dry_run, force=True,
                                  verify=False, create=True,
                                  pos=s_pos, ori=s_ori, message=message)
         ok = (rc == 0)
         line = ("%s  %s  shared_space  stage=%s  props=%d  pos=%s"
                 % (stamp(), "OK" if ok else "FAIL",
-                   meta.get("stage_id") or "?", len(payload.get("props") or []), s_pos))
+                   meta.get("stage_id") or "?", len(sp.get("props") or []), s_pos))
         res = {"ok": ok, "kind": "shared_space", "line": line,
                "stage_id": meta.get("stage_id"), "pos": s_pos}
         write_result(res)

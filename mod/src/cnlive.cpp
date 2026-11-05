@@ -10,7 +10,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <zlib.h>
 #include "bp.h"
+#define CJSON_HIDE_SYMBOLS
+#include "../libraries/htmodloader/includes/cJSON/cJSON.h"
 
 #define CN_READ_RVA  0x21A2210
 #define CN_WRITE_RVA 0x21A22D0
@@ -30,6 +33,10 @@ static char gPool[64] = {0};
 static char gHost[160] = {0};
 static char gRecId[80] = {0};
 static char gLastSession[640] = {0};
+static u8 gSession2[256];
+static u32 gSession2Len = 0;
+static char gSkyLevel[32] = {0};
+static char gSessionId[80] = {0};
 static volatile LONG gReqIdx = 0;
 
 static const char *memFind(const char *hay, u32 n, const char *needle) {
@@ -76,6 +83,8 @@ static int containsCI(const char *hay, u32 n, const char *needle) {
   return 0;
 }
 
+static void captureHeaderIds(const char *buf, u32 len);
+
 // 把请求的完整头部/样本落盘，用于找出国服认证字段
 static void dumpHeaders(const char *buf, u32 len) {
   if (len < 4) return;
@@ -92,6 +101,7 @@ static void dumpHeaders(const char *buf, u32 len) {
     }
   }
   if (hdrEnd > 2048) hdrEnd = 2048;
+  captureHeaderIds(buf, hdrEnd);
 
   // 环形保存完整请求（最多 64 个）
   u32 idx = (u32)InterlockedIncrement((LONG *)&gReqIdx) % 64;
@@ -139,6 +149,19 @@ static void dumpHeaders(const char *buf, u32 len) {
   fclose(f);
 }
 
+// 从请求头抓 x-sky-level-id / X-Session-ID（部署时需要）
+static void captureHeaderIds(const char *buf, u32 len) {
+  char v[128];
+  if (copyValue(buf, len, "\r\nx-sky-level-id: ", v, sizeof(v))) {
+    strncpy(gSkyLevel, v, sizeof(gSkyLevel) - 1);
+    gSkyLevel[sizeof(gSkyLevel) - 1] = 0;
+  }
+  if (copyValue(buf, len, "\r\nX-Session-ID: ", v, sizeof(v))) {
+    strncpy(gSessionId, v, sizeof(gSessionId) - 1);
+    gSessionId[sizeof(gSessionId) - 1] = 0;
+  }
+}
+
 // 保存非请求行（body）样本：国服 create/update 的字段名未知，先全部落盘
 static void saveBodySample(const char *buf, u32 len) {
   if (len < 32) return;
@@ -179,13 +202,18 @@ static void saveSession(void) {
   if (!f) return;
   fprintf(f,
     "{\"user\":\"%s\",\"session\":\"%s\",\"level\":\"%s\","
-    "\"pool_type\":\"%s\",\"host\":\"%s\",\"updated\":%lld}\n",
-    gUser, gSess, gLevel, gPool, gHost, (long long)GetTickCount64());
+    "\"pool_type\":\"%s\",\"host\":\"%s\",\"sky_level_id\":\"%s\","
+    "\"session_id\":\"%s\",\"updated\":%lld}\n",
+    gUser, gSess, gLevel, gPool, gHost, gSkyLevel, gSessionId,
+    (long long)GetTickCount64());
   fclose(f);
   strncpy(gLastSession, sig, sizeof(gLastSession) - 1);
   // 国服地址由网易固定，直接把抓到的 Host 交给部署工具
   if (gHost[0])
     bpWriteServerHost(gHost);
+  // stage 文档可能不带 user_id，用当前登录用户兜底
+  if (gUser[0])
+    bpCaptureSetOwnerFallback(gUser);
   bpLog("CN session: user=%s level=%s pool=%s host=%s",
         gUser, gLevel, gPool, gHost);
 }
@@ -323,8 +351,123 @@ static void saveLink(const char *url) {
   bpListNotifyViewed(url);
 }
 
+static u8 b64Value(unsigned char c) {
+  if (c >= 'A' && c <= 'Z') return (u8)(c - 'A');
+  if (c >= 'a' && c <= 'z') return (u8)(c - 'a' + 26);
+  if (c >= '0' && c <= '9') return (u8)(c - '0' + 52);
+  if (c == '+') return 62;
+  if (c == '/') return 63;
+  return 0xFF;
+}
+
+static int decodeBase64(const char *src, u32 len, u8 *out, u32 cap, u32 *outLen) {
+  u32 n = 0;
+  u32 acc = 0;
+  int bits = 0;
+  for (u32 i = 0; i < len; i++) {
+    unsigned char c = (unsigned char)src[i];
+    if (c == '=') break;
+    if (c == '\r' || c == '\n' || c == ' ' || c == '\t') continue;
+    u8 v = b64Value(c);
+    if (v == 0xFF) return 0;
+    acc = (acc << 6) | v;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      if (n >= cap) return 0;
+      out[n++] = (u8)(acc >> bits);
+    }
+  }
+  *outLen = n;
+  return 1;
+}
+
+static void rc4Crypt(const u8 *key, u32 keyLen, const u8 *in, u32 len, u8 *out) {
+  u8 s[256];
+  for (int i = 0; i < 256; i++) s[i] = (u8)i;
+  u32 j = 0;
+  for (u32 i = 0; i < 256; i++) {
+    j = (j + s[i] + key[i % keyLen]) & 0xFF;
+    u8 t = s[i]; s[i] = s[j]; s[j] = t;
+  }
+  u32 i = 0; j = 0;
+  for (u32 n = 0; n < len; n++) {
+    i = (i + 1) & 0xFF;
+    j = (j + s[i]) & 0xFF;
+    u8 t = s[i]; s[i] = s[j]; s[j] = t;
+    out[n] = in[n] ^ s[(s[i] + s[j]) & 0xFF];
+  }
+}
+
+static int gunzipData(const u8 *src, u32 len, u8 *dst, u32 cap, u32 *outLen) {
+  z_stream z;
+  memset(&z, 0, sizeof(z));
+  z.next_in = (Bytef *)src;
+  z.avail_in = len;
+  z.next_out = dst;
+  z.avail_out = cap;
+  if (inflateInit2(&z, 16 + MAX_WBITS) != Z_OK) return 0;
+  int rc = inflate(&z, Z_FINISH);
+  *outLen = (u32)z.total_out;
+  inflateEnd(&z);
+  return rc == Z_STREAM_END && *outLen <= cap;
+}
+
+static void captureSession2FromLogin(const u8 *plain, u32 len) {
+  if (!plain || !len) return;
+  cJSON *root = cJSON_ParseWithLength((const char *)plain, len);
+  if (!root) return;
+  cJSON *v = cJSON_GetObjectItemCaseSensitive(root, "session2");
+  if (cJSON_IsString(v) && v->valuestring) {
+    u32 n = (u32)strlen(v->valuestring);
+    if (n && n <= sizeof(gSession2)) {
+      memcpy(gSession2, v->valuestring, n);
+      gSession2Len = n;
+      // 交给 Python 部署工具（本地敏感文件，不要外传）
+      if (gCtx.dataFolder[0]) {
+        char p[MAX_PATH];
+        snprintf(p, sizeof(p), "%s\\session2.txt", gCtx.dataFolder);
+        FILE *sf = fopen(p, "w");
+        if (sf) { fputs(v->valuestring, sf); fclose(sf); }
+      }
+      bpLog("CN session2 captured (%u bytes)", n);
+    }
+  }
+  cJSON_Delete(root);
+}
+
+static int decodeCnResponse(const char *headers, u32 headerLen,
+                            const char *body, u32 bodyLen,
+                            u8 *out, u32 outCap, u32 *outLen) {
+  int isGzip = containsCI(headers, headerLen, "content-encoding: gzip");
+  int isSession = containsCI(headers, headerLen, "content-encoding: session-valid");
+  int isGzipSession = containsCI(headers, headerLen, "content-encoding: gzip-session-valid");
+
+  if (!isGzip && !isSession && !isGzipSession) return 0;
+  if (isGzipSession || isSession) {
+    if (!gSession2Len || bodyLen > outCap) return 0;
+    rc4Crypt(gSession2, gSession2Len, (const u8 *)body, bodyLen, out);
+    if (isGzipSession) {
+      u8 *tmp = (u8 *)malloc(outCap);
+      if (!tmp) return 0;
+      memcpy(tmp, out, bodyLen);
+      int ok = gunzipData(tmp, bodyLen, out, outCap, outLen);
+      free(tmp);
+      return ok;
+    }
+    *outLen = bodyLen;
+    return 1;
+  }
+
+  return gunzipData((const u8 *)body, bodyLen, out, outCap, outLen);
+}
+
 static void processResponse(const char *body, u32 len) {
   if (len < 16) return;
+
+  // 复用国际服的解析：共享空间 stage 文档 / feed（多人、空间坐标、留言）
+  bpCaptureStageJson(body, len);
+  bpCaptureFeedJson(body, len);
 
   // 从 get_user_feeds 等响应里学习当前 level/pool
   {
@@ -414,7 +557,19 @@ static void consume(CnCtx *c) {
       }
     }
 
-    processResponse(he, contentLen);
+    // 解码国服的 gzip / session-valid / gzip-session-valid 响应。
+    // session2 从 login 的 gzip 响应提取，stage props 从 gzip-session-valid 解出。
+    u8 *decoded = (u8 *)malloc(1024 * 1024);
+    u32 decodedLen = 0;
+    int didDecode = decoded && decodeCnResponse(c->buf, headerLen, he, contentLen,
+                                                 decoded, 1024 * 1024, &decodedLen);
+    if (didDecode) {
+      captureSession2FromLogin(decoded, decodedLen);
+      processResponse((const char *)decoded, decodedLen);
+    } else {
+      processResponse(he, contentLen);
+    }
+    if (decoded) free(decoded);
 
     // 带 Content-Range 的响应是 recording/ugc 的分块数据，直接落盘
     {
@@ -445,6 +600,53 @@ static void consume(CnCtx *c) {
   }
 }
 
+// 临时诊断：把国服读到的原始字节落盘（上限 4MB），用于确认小屋 stage 数据
+// 是否经过这个 hook、是否被 gzip 压缩。
+static void rawDump(const char *buf, u32 len) {
+  static FILE *f = NULL;
+  static u32 wrote = 0;
+  if (!f) {
+    char dir[MAX_PATH], path[MAX_PATH];
+    snprintf(dir, sizeof(dir), "%s\\captures", gCtx.dataFolder);
+    CreateDirectoryA(dir, NULL);
+    snprintf(path, sizeof(path), "%s\\cn_raw.bin", dir);
+    f = fopen(path, "wb");
+    if (!f) return;
+    bpLog("CN raw dump -> %s", path);
+  }
+  if (wrote >= 4 * 1024 * 1024) {
+    fclose(f);
+    f = NULL;
+    return;
+  }
+  fwrite(buf, 1, len, f);
+  fflush(f);
+  wrote += len;
+}
+
+// 出站请求原始字节（上限 2MB），用于找国服 stage 请求的路径和字段
+static void rawDumpW(const char *buf, u32 len) {
+  static FILE *f = NULL;
+  static u32 wrote = 0;
+  if (!f) {
+    char dir[MAX_PATH], path[MAX_PATH];
+    snprintf(dir, sizeof(dir), "%s\\captures", gCtx.dataFolder);
+    CreateDirectoryA(dir, NULL);
+    snprintf(path, sizeof(path), "%s\\cn_raw_w.bin", dir);
+    f = fopen(path, "wb");
+    if (!f) return;
+    bpLog("CN raw w dump -> %s", path);
+  }
+  if (wrote >= 2 * 1024 * 1024) {
+    fclose(f);
+    f = NULL;
+    return;
+  }
+  fwrite(buf, 1, len, f);
+  fflush(f);
+  wrote += len;
+}
+
 static int det_read(u64 ssl, void *buf, int num) {
   int ret = g_trampRead ? g_trampRead(ssl, buf, num) : 0;
   if (ret > 0 && buf) {
@@ -462,10 +664,96 @@ static int det_read(u64 ssl, void *buf, int num) {
   return ret;
 }
 
+// 国服写请求（stage / social-feed create）原样落盘：请求头里带路径，
+// 加密的 body 是同一 SSL 上紧接着的另一次 write，所以命中后要连抓 3 秒。
+#define CN_DUMP_SLOTS 4
+static u64 gDumpSsl[CN_DUMP_SLOTS];
+static u32 gDumpUntil[CN_DUMP_SLOTS];
+static u32 gDumpSeq = 0;
+
+static void dumpBuffer(const char *buf, u32 len) {
+  if (!gCtx.dataFolder[0]) return;
+  char dir[MAX_PATH], path[MAX_PATH];
+  snprintf(dir, sizeof(dir), "%s\\captures", gCtx.dataFolder);
+  CreateDirectoryA(dir, NULL);
+  snprintf(path, sizeof(path), "%s\\cn_w_%04u.bin", dir, gDumpSeq++ % 400);
+  FILE *f = fopen(path, "wb");
+  if (f) {
+    fwrite(buf, 1, len, f);
+    fclose(f);
+    bpLog("CN write captured -> %s (%u bytes)", path, len);
+  }
+}
+
+static void dumpWriteRequest(u64 ssl, const char *buf, u32 len) {
+  int interesting =
+      memFind(buf, len, "/service/stage/api/v1/") != NULL ||
+      memFind(buf, len, "/service/social-feed/api/v1/create") != NULL ||
+      memFind(buf, len, "/service/recording/api/") != NULL;
+  if (interesting) {
+    dumpBuffer(buf, len);
+    for (int i = 0; i < CN_DUMP_SLOTS; i++) {
+      if (gDumpSsl[i] == 0 || gDumpSsl[i] == ssl ||
+          (int)(gDumpUntil[i] - GetTickCount()) < 0) {
+        gDumpSsl[i] = ssl;
+        gDumpUntil[i] = GetTickCount() + 3000;
+        break;
+      }
+    }
+    return;
+  }
+  // 命中之后的后续 write（加密 body）
+  for (int i = 0; i < CN_DUMP_SLOTS; i++) {
+    if (gDumpSsl[i] == ssl && (int)(gDumpUntil[i] - GetTickCount()) > 0)
+      dumpBuffer(buf, len);
+  }
+}
+
+// 解密出站 body（{"user":..,"body":base64(RC4(json))}），用于记录看过的留言
+static void decryptOutbound(const char *buf, u32 len) {
+  if (!gSession2Len || !buf || len < 32) return;
+  if (!memFind(buf, len, "\"body\":\"")) return;
+  cJSON *root = cJSON_ParseWithLength(buf, len);
+  if (!root) return;
+  cJSON *b = cJSON_GetObjectItemCaseSensitive(root, "body");
+  if (cJSON_IsString(b) && b->valuestring) {
+    u32 blen = (u32)strlen(b->valuestring);
+    u8 *enc = (u8 *)malloc(blen ? blen : 1);
+    u32 enclen = 0;
+    if (enc && decodeBase64(b->valuestring, blen, enc, blen, &enclen) && enclen) {
+      u8 *plain = (u8 *)malloc(enclen + 1);
+      if (plain) {
+        rc4Crypt(gSession2, gSession2Len, enc, enclen, plain);
+        plain[enclen] = 0;
+        if (memFind((const char *)plain, enclen, "\"social_feed_id\":\"")) {
+          bpLog("CN view req decrypted (%u bytes)", enclen);
+          // 留一份明文样本，便于对不上时离线查
+          char dir[MAX_PATH], path[MAX_PATH];
+          snprintf(dir, sizeof(dir), "%s\\captures", gCtx.dataFolder);
+          CreateDirectoryA(dir, NULL);
+          static u32 vseq = 0;
+          snprintf(path, sizeof(path), "%s\\cn_view_%04u.bin", dir, vseq++ % 100);
+          FILE *vf = fopen(path, "wb");
+          if (vf) { fwrite(plain, 1, enclen, vf); fclose(vf); }
+        }
+        bpCaptureOutboundJson((const char *)plain, enclen);
+        free(plain);
+      }
+    }
+    if (enc) free(enc);
+  }
+  cJSON_Delete(root);
+}
+
 static int det_write(u64 ssl, void *buf, int num) {
   if (buf && num > 0) {
     u32 take = (u32)num;
     if (take > 65536) take = 65536;
+    dumpWriteRequest(ssl, (const char *)buf, take);
+    decryptOutbound((const char *)buf, take);
+    // 明文请求（部分接口不加密）
+    if (memFind((const char *)buf, take, "\"social_feed_id\":\""))
+      bpCaptureOutboundJson((const char *)buf, take);
     captureRequest((const char *)buf, take, ssl);
   }
   return g_trampWrite ? g_trampWrite(ssl, buf, num) : 0;
@@ -490,6 +778,8 @@ static int det_w3(u64 ssl, void *buf, int num) {
 }
 
 void bpCnLiveInit(void) {
+  bpCaptureLocksInit();
+
   HMODULE h = GetModuleHandleA(NULL);
   if (!h) return;
 
