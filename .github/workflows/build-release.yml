@@ -82,7 +82,7 @@ jobs:
           zip -r "$ASSET_NAME" "$name"
 
           # 国服版：单独的 manifest（game_edition 3）
-          cn="sky-blueprint-cn"
+          cn="sky-blueprint"
           rm -rf "$cn" "$ASSET_CN_NAME"
           mkdir -p "$cn"
           cp mod/dist_cn_live/sky-blueprint.dll "$cn/"
